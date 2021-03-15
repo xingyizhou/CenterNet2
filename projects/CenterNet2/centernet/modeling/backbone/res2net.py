@@ -1,4 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# This file is modified from https://github.com/Res2Net/Res2Net-detectron2/blob/master/detectron2/modeling/backbone/resnet.py
+# The original file is under Apache-2.0 License
 import numpy as np
 import fvcore.nn.weight_init as weight_init
 import torch

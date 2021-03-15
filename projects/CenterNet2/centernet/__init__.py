@@ -11,4 +11,3 @@ from .modeling.backbone.res2net import build_p67_res2net_fpn_backbone
 
 from .data.datasets.objects365 import categories_v1
 from .data.datasets.coco import _PREDEFINED_SPLITS_COCO
-from .data.datasets.lvis_v1 import _PREDEFINED_SPLITS_LVIS_V1
