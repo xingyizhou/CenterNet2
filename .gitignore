@@ -48,6 +48,8 @@ _darcs
 /detectron2/model_zoo/configs
 /datasets/*
 !/datasets/*.*
+!/datasets/lvis/
+/datasets/lvis/*
 !/datasets/lvis/lvis_v1_train_cat_info.json
 /projects/*/datasets
 /models
