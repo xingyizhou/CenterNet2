@@ -7,7 +7,7 @@ inference_test_output
 *.png
 *.json
 *.diff
-*.jpg
+# *.jpg
 !/projects/DensePose/doc/images/*.jpg
 
 # compilation and distribution
@@ -48,6 +48,7 @@ _darcs
 /detectron2/model_zoo/configs
 /datasets/*
 !/datasets/*.*
+!/datasets/lvis/lvis_v1_train_cat_info.json
 /projects/*/datasets
 /models
 /snippet

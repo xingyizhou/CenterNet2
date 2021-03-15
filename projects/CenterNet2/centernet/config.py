@@ -46,7 +46,7 @@ def add_centernet_config(cfg):
     _C.MODEL.ROI_BOX_HEAD.PRIOR_PROB = 0.01
     _C.MODEL.ROI_BOX_HEAD.USE_EQL_LOSS = False
     _C.MODEL.ROI_BOX_HEAD.CAT_FREQ_PATH = \
-        'datasets/oid/annotations/openimages_challenge_2019_train_v2_cat_info.json'
+        'datasets/lvis/lvis_v1_train_cat_info.json'
     _C.MODEL.ROI_BOX_HEAD.EQL_FREQ_CAT = 200
     _C.MODEL.ROI_BOX_HEAD.USE_FED_LOSS = False
     _C.MODEL.ROI_BOX_HEAD.FED_LOSS_NUM_CAT = 50
