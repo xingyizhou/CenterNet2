@@ -16,6 +16,7 @@ from detectron2.structures import Boxes, Instances
 from detectron2.utils.events import get_event_storage
 from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers, FastRCNNOutputs
 from detectron2.modeling.roi_heads.fast_rcnn import fast_rcnn_inference
+from detectron2.modeling.roi_heads.fast_rcnn import _log_classification_stats
 from detectron2.utils.comm import get_world_size
 
 __all__ = ["CustomFastRCNNOutputLayers", "CustomFastRCNNOutputs"]
@@ -53,7 +54,8 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
     def sigmoid_cross_entropy_loss(self):
         if self._no_instances:
             return self.pred_class_logits.sum() * 0
-        self._log_accuracy()
+        # self._log_accuracy()
+        _log_classification_stats(self.pred_class_logits, self.gt_classes)
 
         B = self.pred_class_logits.shape[0]
         C = self.pred_class_logits.shape[1] - 1
@@ -111,7 +113,8 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
         if self._no_instances:
             return self.pred_class_logits.sum() * 0
         else:
-            self._log_accuracy()
+            # self._log_accuracy()
+            _log_classification_stats(self.pred_class_logits, self.gt_classes)
             return F.cross_entropy(self.pred_class_logits, self.gt_classes, reduction="mean")
 
 
