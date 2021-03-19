@@ -3,7 +3,7 @@ Two-stage object detectors that use class-agnostic one-stage detectors as the pr
 
 <p align="center"> <img src='projects/CenterNet2/centernet2_docs/centernet2_teaser.jpg' align="center" height="150px"> </p>
 
-> [**Probabilistic two-stage detection**](http://arxiv.org/abs/xxxx.xxxxx),            
+> [**Probabilistic two-stage detection**](http://arxiv.org/abs/2103.07461),            
 > Xingyi Zhou, Vladlen Koltun, Philipp Kr&auml;henb&uuml;hl,        
 > *arXiv technical report ([arXiv 2103.07461](http://arxiv.org/abs/2103.07461))*         
 
