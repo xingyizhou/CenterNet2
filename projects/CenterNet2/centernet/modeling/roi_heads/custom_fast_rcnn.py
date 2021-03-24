@@ -1,8 +1,8 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 # Part of the code is from https://github.com/tztztztztz/eql.detectron2/blob/master/projects/EQL/eql/fast_rcnn.py
+import json
 import logging
 import math
-import json
 from typing import Dict, Union
 import torch
 from fvcore.nn import giou_loss, smooth_l1_loss
@@ -12,12 +12,15 @@ from torch.nn import functional as F
 from detectron2.config import configurable
 from detectron2.layers import Linear, ShapeSpec, batched_nms, cat, nonzero_tuple
 from detectron2.modeling.box_regression import Box2BoxTransform
+from detectron2.modeling.roi_heads.fast_rcnn import (
+    FastRCNNOutputLayers,
+    FastRCNNOutputs,
+    _log_classification_stats,
+    fast_rcnn_inference,
+)
 from detectron2.structures import Boxes, Instances
-from detectron2.utils.events import get_event_storage
-from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers, FastRCNNOutputs
-from detectron2.modeling.roi_heads.fast_rcnn import fast_rcnn_inference
-from detectron2.modeling.roi_heads.fast_rcnn import _log_classification_stats
 from detectron2.utils.comm import get_world_size
+from detectron2.utils.events import get_event_storage
 
 __all__ = ["CustomFastRCNNOutputLayers", "CustomFastRCNNOutputs"]
 
@@ -34,11 +37,19 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
         box_reg_loss_type="smooth_l1",
         freq_weight=None,
     ):
-        super().__init__(box2box_transform, pred_class_logits, 
-            pred_proposal_deltas, proposals, smooth_l1_beta, box_reg_loss_type)
+        super().__init__(
+            box2box_transform,
+            pred_class_logits,
+            pred_proposal_deltas,
+            proposals,
+            smooth_l1_beta,
+            box_reg_loss_type,
+        )
         self._no_instances = (self.pred_class_logits.numel() == 0) or (len(proposals) == 0)
         if self._no_instances:
-            print('No instances!', pred_class_logits.shape, pred_proposal_deltas.shape, len(proposals))
+            print(
+                "No instances!", pred_class_logits.shape, pred_proposal_deltas.shape, len(proposals)
+            )
         self.box_batch_size = cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE * len(proposals)
         self.use_sigmoid_ce = cfg.MODEL.ROI_BOX_HEAD.USE_SIGMOID_CE
         self.use_eql_loss = cfg.MODEL.ROI_BOX_HEAD.USE_EQL_LOSS
@@ -47,8 +58,7 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
 
         self.freq_weight = freq_weight
 
-
-        if len(self.gt_classes) > 0: 
+        if len(self.gt_classes) > 0:
             assert self.gt_classes.max() <= cfg.MODEL.ROI_HEADS.NUM_CLASSES, self.gt_classes.max()
 
     def sigmoid_cross_entropy_loss(self):
@@ -61,18 +71,18 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
         C = self.pred_class_logits.shape[1] - 1
 
         target = self.pred_class_logits.new_zeros(B, C + 1)
-        target[range(len(self.gt_classes)), self.gt_classes] = 1 # B x (C + 1)
-        target = target[:, :C] # B x C
+        target[range(len(self.gt_classes)), self.gt_classes] = 1  # B x (C + 1)
+        target = target[:, :C]  # B x C
 
         weight = 1
-        if (self.freq_weight is not None) and self.use_eql_loss: # eql loss
+        if (self.freq_weight is not None) and self.use_eql_loss:  # eql loss
             exclude_weight = (self.gt_classes != C).float().view(B, 1).expand(B, C)
             threshold_weight = self.freq_weight.view(1, C).expand(B, C)
-            eql_w = 1 - exclude_weight * threshold_weight * (1 - target) # B x C
+            eql_w = 1 - exclude_weight * threshold_weight * (1 - target)  # B x C
             weight = weight * eql_w
 
-        if (self.freq_weight is not None) and self.use_fed_loss: # fedloss
-            appeared = torch.unique(self.gt_classes) # C'
+        if (self.freq_weight is not None) and self.use_fed_loss:  # fedloss
+            appeared = torch.unique(self.gt_classes)  # C'
             prob = appeared.new_ones(C + 1).float()
             if len(appeared) < self.fed_loss_num_cat:
                 if self.fed_loss_freq_weight > 0:
@@ -81,30 +91,31 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
                     prob[:C] = prob[:C] * (1 - self.freq_weight)
                 prob[appeared] = 0
                 more_appeared = torch.multinomial(
-                    prob, self.fed_loss_num_cat - len(appeared),
-                    replacement=False)
+                    prob, self.fed_loss_num_cat - len(appeared), replacement=False
+                )
                 appeared = torch.cat([appeared, more_appeared])
             appeared_mask = appeared.new_zeros(C + 1)
-            appeared_mask[appeared] = 1 # C + 1
+            appeared_mask[appeared] = 1  # C + 1
             appeared_mask = appeared_mask[:C]
             fed_w = appeared_mask.view(1, C).expand(B, C)
             weight = weight * fed_w
 
         if (self.hierarchy_weight is not None) and self.hierarchy_ignore:
             if self.pos_parents:
-                target = torch.mm(target, self.is_parents) + target # B x C
-            hierarchy_w = self.hierarchy_weight[self.gt_classes] # B x C
+                target = torch.mm(target, self.is_parents) + target  # B x C
+            hierarchy_w = self.hierarchy_weight[self.gt_classes]  # B x C
             weight = weight * hierarchy_w
 
         if self.with_distill_score:
-            distill_weight = (self.gt_classes < C).float() * self.distill_scores + \
-                (self.gt_classes == C).float() * 1.
+            distill_weight = (self.gt_classes < C).float() * self.distill_scores + (
+                self.gt_classes == C
+            ).float() * 1.0
             weight = weight * distill_weight[:, None]
 
         cls_loss = F.binary_cross_entropy_with_logits(
-            self.pred_class_logits[:, :-1], target, reduction='none') # B x C
+            self.pred_class_logits[:, :-1], target, reduction="none"
+        )  # B x C
         return torch.sum(cls_loss * weight) / B
-
 
     def softmax_cross_entropy_loss(self):
         """
@@ -117,13 +128,12 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
             _log_classification_stats(self.pred_class_logits, self.gt_classes)
             return F.cross_entropy(self.pred_class_logits, self.gt_classes, reduction="mean")
 
-
     def box_reg_loss(self):
         """
         change _no_instance handling and normalization
         """
         if self._no_instances:
-            print('No instance in box reg loss')
+            print("No instance in box reg loss")
             return self.pred_proposal_deltas.sum() * 0
 
         box_dim = self.gt_boxes.tensor.size(1)  # 4 or 5
@@ -166,11 +176,8 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
             loss_cls = self.sigmoid_cross_entropy_loss()
         else:
             loss_cls = self.softmax_cross_entropy_loss()
-        return {
-            "loss_cls": loss_cls, 
-            "loss_box_reg": self.box_reg_loss()
-        }
-        
+        return {"loss_cls": loss_cls, "loss_box_reg": self.box_reg_loss()}
+
     def predict_probs(self):
         """
         Deprecated
@@ -185,37 +192,34 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
 def _load_class_freq(cfg):
     freq_weight = None
     if cfg.MODEL.ROI_BOX_HEAD.USE_EQL_LOSS or cfg.MODEL.ROI_BOX_HEAD.USE_FED_LOSS:
-        cat_info = json.load(open(cfg.MODEL.ROI_BOX_HEAD.CAT_FREQ_PATH, 'r'))
+        cat_info = json.load(open(cfg.MODEL.ROI_BOX_HEAD.CAT_FREQ_PATH, "r"))
         cat_info = torch.tensor(
-            [c['image_count'] for c in sorted(cat_info, key=lambda x: x['id'])],
-            device=torch.device(cfg.MODEL.DEVICE))
-        if cfg.MODEL.ROI_BOX_HEAD.USE_FED_LOSS and \
-            cfg.MODEL.ROI_BOX_HEAD.FED_LOSS_FREQ_WEIGHT > 0.:
-            freq_weight = \
-                cat_info.float() ** cfg.MODEL.ROI_BOX_HEAD.FED_LOSS_FREQ_WEIGHT
+            [c["image_count"] for c in sorted(cat_info, key=lambda x: x["id"])],
+            device=torch.device(cfg.MODEL.DEVICE),
+        )
+        if (
+            cfg.MODEL.ROI_BOX_HEAD.USE_FED_LOSS
+            and cfg.MODEL.ROI_BOX_HEAD.FED_LOSS_FREQ_WEIGHT > 0.0
+        ):
+            freq_weight = cat_info.float() ** cfg.MODEL.ROI_BOX_HEAD.FED_LOSS_FREQ_WEIGHT
         else:
             thresh, _ = torch.kthvalue(
-                cat_info,
-                len(cat_info) - cfg.MODEL.ROI_BOX_HEAD.EQL_FREQ_CAT + 1)
+                cat_info, len(cat_info) - cfg.MODEL.ROI_BOX_HEAD.EQL_FREQ_CAT + 1
+            )
             freq_weight = (cat_info < thresh.item()).float()
 
     return freq_weight
 
 
 class CustomFastRCNNOutputLayers(FastRCNNOutputLayers):
-    def __init__(
-        self, 
-        cfg, 
-        input_shape: ShapeSpec,
-        **kwargs
-    ):
+    def __init__(self, cfg, input_shape: ShapeSpec, **kwargs):
         super().__init__(cfg, input_shape, **kwargs)
         self.use_sigmoid_ce = cfg.MODEL.ROI_BOX_HEAD.USE_SIGMOID_CE
         if self.use_sigmoid_ce:
             prior_prob = cfg.MODEL.ROI_BOX_HEAD.PRIOR_PROB
             bias_value = -math.log((1 - prior_prob) / prior_prob)
             nn.init.constant_(self.cls_score.bias, bias_value)
-        
+
         self.cfg = cfg
         self.freq_weight = _load_class_freq(cfg)
 
@@ -232,7 +236,7 @@ class CustomFastRCNNOutputLayers(FastRCNNOutputLayers):
             proposals,
             self.smooth_l1_beta,
             self.box_reg_loss_type,
-            self.freq_weight if use_advanced_loss else None, 
+            self.freq_weight if use_advanced_loss else None,
         ).losses()
         return {k: v * self.loss_weight.get(k, 1.0) for k, v in losses.items()}
 
@@ -243,9 +247,8 @@ class CustomFastRCNNOutputLayers(FastRCNNOutputLayers):
         boxes = self.predict_boxes(predictions, proposals)
         scores = self.predict_probs(predictions, proposals)
         if self.cfg.MODEL.ROI_BOX_HEAD.MULT_PROPOSAL_SCORE:
-            proposal_scores = [p.get('objectness_logits') for p in proposals]
-            scores = [(s * ps[:, None]) ** 0.5 \
-                for s, ps in zip(scores, proposal_scores)]
+            proposal_scores = [p.get("objectness_logits") for p in proposals]
+            scores = [(s * ps[:, None]) ** 0.5 for s, ps in zip(scores, proposal_scores)]
         image_shapes = [x.image_size for x in proposals]
         return fast_rcnn_inference(
             boxes,
@@ -255,7 +258,6 @@ class CustomFastRCNNOutputLayers(FastRCNNOutputLayers):
             self.test_nms_thresh,
             self.test_topk_per_image,
         )
-
 
     def predict_probs(self, predictions, proposals):
         """
