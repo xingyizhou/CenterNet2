@@ -16,7 +16,7 @@ from detectron2.structures import Boxes, Instances
 from detectron2.utils.events import get_event_storage
 from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers, FastRCNNOutputs
 from detectron2.modeling.roi_heads.fast_rcnn import fast_rcnn_inference
-# from detectron2.modeling.roi_heads.fast_rcnn import _log_classification_stats
+from detectron2.modeling.roi_heads.fast_rcnn import _log_classification_stats
 from detectron2.utils.comm import get_world_size
 
 __all__ = ["CustomFastRCNNOutputLayers", "CustomFastRCNNOutputs"]
