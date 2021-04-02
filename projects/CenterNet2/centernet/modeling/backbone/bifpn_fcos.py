@@ -300,7 +300,7 @@ class BiFPN(Backbone):
         bottom_up_output_shapes = self.bottom_up.output_shape()
 
         in_features = sorted(in_features, key=lambda x: split_name(x)[1])
-        self._size_divisibility = bottom_up_output_shapes[in_features[-1]].stride
+        self._size_divisibility = 128 #bottom_up_output_shapes[in_features[-1]].stride
         self.out_channels = out_channels
         self.min_level = split_name(in_features[0])[1]
 

@@ -14,6 +14,7 @@ MODEL:
   FPN:
     IN_FEATURES: ["dla3", "dla4", "dla5"]
 SOLVER:
+  LR_SCHEDULER_NAME: "WarmupCosineLR"
   MAX_ITER: 360000
   BASE_LR: 0.08
   IMS_PER_BATCH: 64
