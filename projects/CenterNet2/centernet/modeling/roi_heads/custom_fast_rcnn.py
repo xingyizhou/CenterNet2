@@ -16,7 +16,7 @@ from detectron2.structures import Boxes, Instances
 from detectron2.utils.events import get_event_storage
 from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers, FastRCNNOutputs
 from detectron2.modeling.roi_heads.fast_rcnn import fast_rcnn_inference
-from detectron2.modeling.roi_heads.fast_rcnn import _log_classification_stats
+# from detectron2.modeling.roi_heads.fast_rcnn import _log_classification_stats
 from detectron2.utils.comm import get_world_size
 
 __all__ = ["CustomFastRCNNOutputLayers", "CustomFastRCNNOutputs"]
@@ -44,16 +44,15 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
         self.use_eql_loss = cfg.MODEL.ROI_BOX_HEAD.USE_EQL_LOSS
         self.use_fed_loss = cfg.MODEL.ROI_BOX_HEAD.USE_FED_LOSS
         self.fed_loss_num_cat = cfg.MODEL.ROI_BOX_HEAD.FED_LOSS_NUM_CAT
-
+        self.fed_loss_freq_weight = cfg.MODEL.ROI_BOX_HEAD.FED_LOSS_FREQ_WEIGHT
         self.freq_weight = freq_weight
-
 
         if len(self.gt_classes) > 0: 
             assert self.gt_classes.max() <= cfg.MODEL.ROI_HEADS.NUM_CLASSES, self.gt_classes.max()
 
     def sigmoid_cross_entropy_loss(self):
         if self._no_instances:
-            return self.pred_class_logits.sum() * 0
+            return self.pred_class_logits.new_zeros([1])[0] # This is more robust than .sum() * 0.
         # self._log_accuracy()
         _log_classification_stats(self.pred_class_logits, self.gt_classes)
 
@@ -90,17 +89,6 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
             fed_w = appeared_mask.view(1, C).expand(B, C)
             weight = weight * fed_w
 
-        if (self.hierarchy_weight is not None) and self.hierarchy_ignore:
-            if self.pos_parents:
-                target = torch.mm(target, self.is_parents) + target # B x C
-            hierarchy_w = self.hierarchy_weight[self.gt_classes] # B x C
-            weight = weight * hierarchy_w
-
-        if self.with_distill_score:
-            distill_weight = (self.gt_classes < C).float() * self.distill_scores + \
-                (self.gt_classes == C).float() * 1.
-            weight = weight * distill_weight[:, None]
-
         cls_loss = F.binary_cross_entropy_with_logits(
             self.pred_class_logits[:, :-1], target, reduction='none') # B x C
         return torch.sum(cls_loss * weight) / B
@@ -111,7 +99,7 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
         change _no_instance handling
         """
         if self._no_instances:
-            return self.pred_class_logits.sum() * 0
+            return self.pred_class_logits.new_zeros([1])[0]
         else:
             # self._log_accuracy()
             _log_classification_stats(self.pred_class_logits, self.gt_classes)
@@ -124,7 +112,7 @@ class CustomFastRCNNOutputs(FastRCNNOutputs):
         """
         if self._no_instances:
             print('No instance in box reg loss')
-            return self.pred_proposal_deltas.sum() * 0
+            return self.pred_proposal_deltas.new_zeros([1])[0]
 
         box_dim = self.gt_boxes.tensor.size(1)  # 4 or 5
         cls_agnostic_bbox_reg = self.pred_proposal_deltas.size(1) == box_dim
