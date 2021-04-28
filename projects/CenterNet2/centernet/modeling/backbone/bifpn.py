@@ -17,6 +17,7 @@ from detectron2.modeling.backbone.resnet import build_resnet_backbone
 from detectron2.modeling.backbone.build import BACKBONE_REGISTRY
 from detectron2.layers.batch_norm import get_norm
 from detectron2.modeling.backbone import Backbone
+from .dlafpn import dla34
 
 def get_fpn_config(base_reduction=8):
     """BiFPN config with sum."""
@@ -387,6 +388,30 @@ def build_resnet_bifpn_backbone(cfg, input_shape: ShapeSpec):
     """
     bottom_up = build_resnet_backbone(cfg, input_shape)
     in_features = cfg.MODEL.FPN.IN_FEATURES
+    backbone = BiFPN(
+        cfg=cfg,
+        bottom_up=bottom_up,
+        in_features=in_features,
+        out_channels=cfg.MODEL.BIFPN.OUT_CHANNELS,
+        norm=cfg.MODEL.BIFPN.NORM,
+        num_levels=cfg.MODEL.BIFPN.NUM_LEVELS,
+        num_bifpn=cfg.MODEL.BIFPN.NUM_BIFPN,
+        separable_conv=cfg.MODEL.BIFPN.SEPARABLE_CONV,
+    )
+    return backbone
+
+@BACKBONE_REGISTRY.register()
+def build_p37_dla_bifpn_backbone(cfg, input_shape: ShapeSpec):
+    """
+    Args:
+        cfg: a detectron2 CfgNode
+    Returns:
+        backbone (Backbone): backbone module, must be a subclass of :class:`Backbone`.
+    """
+    bottom_up = dla34(cfg)
+    in_features = cfg.MODEL.FPN.IN_FEATURES
+    assert cfg.MODEL.BIFPN.NUM_LEVELS == 5
+
     backbone = BiFPN(
         cfg=cfg,
         bottom_up=bottom_up,
