@@ -76,8 +76,7 @@ class CustomFastRCNNOutputLayers(FastRCNNOutputLayers):
         return {
             "loss_cls": loss_cls, 
             "loss_box_reg": self.box_reg_loss(
-                proposal_boxes, gt_boxes, proposal_deltas, gt_classes, 
-                num_classes=num_classes)
+                proposal_boxes, gt_boxes, proposal_deltas, gt_classes)
         }
 
 
