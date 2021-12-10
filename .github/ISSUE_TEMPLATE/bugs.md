@@ -19,18 +19,18 @@ git rev-parse HEAD; git diff
 <put logs here>
 ```
 4. please simplify the steps as much as possible so they do not require additional resources to
-	 run, such as a private dataset.
+   run, such as a private dataset.
 
 ## Expected behavior:
 
-If there are no obvious error in "what you observed" provided above,
+If there are no obvious error in "full logs" provided above,
 please tell us the expected behavior.
 
 ## Environment:
 
 Provide your environment information using the following command:
 ```
-wget -nc -q https://github.com/facebookresearch/detectron2/raw/master/detectron2/utils/collect_env.py && python collect_env.py
+wget -nc -q https://github.com/facebookresearch/detectron2/raw/main/detectron2/utils/collect_env.py && python collect_env.py
 ```
 
 If your issue looks like an installation issue / environment issue,

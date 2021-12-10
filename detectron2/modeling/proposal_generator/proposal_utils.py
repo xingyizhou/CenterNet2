@@ -1,22 +1,22 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 import logging
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Union
 import torch
 
 from detectron2.layers import batched_nms, cat
 from detectron2.structures import Boxes, Instances
-from detectron2.utils.env import TORCH_VERSION
 
 logger = logging.getLogger(__name__)
 
 
 def _is_tracing():
+    # (fixed in TORCH_VERSION >= 1.9)
     if torch.jit.is_scripting():
         # https://github.com/pytorch/pytorch/issues/47379
         return False
     else:
-        return TORCH_VERSION >= (1, 7) and torch.jit.is_tracing()
+        return torch.jit.is_tracing()
 
 
 def find_top_rpn_proposals(
@@ -72,11 +72,7 @@ def find_top_rpn_proposals(
         else:
             num_proposals_i = min(Hi_Wi_A, pre_nms_topk)
 
-        # sort is faster than topk: https://github.com/pytorch/pytorch/issues/22812
-        # topk_scores_i, topk_idx = logits_i.topk(num_proposals_i, dim=1)
-        logits_i, idx = logits_i.sort(descending=True, dim=1)
-        topk_scores_i = logits_i.narrow(1, 0, num_proposals_i)
-        topk_idx = idx.narrow(1, 0, num_proposals_i)
+        topk_scores_i, topk_idx = logits_i.topk(num_proposals_i, dim=1)
 
         # each is N x topk
         topk_proposals_i = proposals_i[batch_idx[:, None], topk_idx]  # N x topk x 4
@@ -130,13 +126,15 @@ def find_top_rpn_proposals(
     return results
 
 
-def add_ground_truth_to_proposals(gt_boxes, proposals):
+def add_ground_truth_to_proposals(
+    gt: Union[List[Instances], List[Boxes]], proposals: List[Instances]
+) -> List[Instances]:
     """
     Call `add_ground_truth_to_proposals_single_image` for all images.
 
     Args:
-        gt_boxes(list[Boxes]): list of N elements. Element i is a Boxes
-            representing the gound-truth for image i.
+        gt(Union[List[Instances], List[Boxes]): list of N elements. Element i is a Instances
+            representing the ground-truth for image i.
         proposals (list[Instances]): list of N elements. Element i is a Instances
             representing the proposals for image i.
 
@@ -144,29 +142,37 @@ def add_ground_truth_to_proposals(gt_boxes, proposals):
         list[Instances]: list of N Instances. Each is the proposals for the image,
             with field "proposal_boxes" and "objectness_logits".
     """
-    assert gt_boxes is not None
+    assert gt is not None
 
-    assert len(proposals) == len(gt_boxes)
+    if len(proposals) != len(gt):
+        raise ValueError("proposals and gt should have the same length as the number of images!")
     if len(proposals) == 0:
         return proposals
 
     return [
-        add_ground_truth_to_proposals_single_image(gt_boxes_i, proposals_i)
-        for gt_boxes_i, proposals_i in zip(gt_boxes, proposals)
+        add_ground_truth_to_proposals_single_image(gt_i, proposals_i)
+        for gt_i, proposals_i in zip(gt, proposals)
     ]
 
 
-def add_ground_truth_to_proposals_single_image(gt_boxes, proposals):
+def add_ground_truth_to_proposals_single_image(
+    gt: Union[Instances, Boxes], proposals: Instances
+) -> Instances:
     """
-    Augment `proposals` with ground-truth boxes from `gt_boxes`.
+    Augment `proposals` with `gt`.
 
     Args:
-        Same as `add_ground_truth_to_proposals`, but with gt_boxes and proposals
+        Same as `add_ground_truth_to_proposals`, but with gt and proposals
         per image.
 
     Returns:
         Same as `add_ground_truth_to_proposals`, but for only one image.
     """
+    if isinstance(gt, Boxes):
+        # convert Boxes to Instances
+        gt = Instances(proposals.image_size, gt_boxes=gt)
+
+    gt_boxes = gt.gt_boxes
     device = proposals.objectness_logits.device
     # Assign all ground-truth boxes an objectness logit corresponding to
     # P(object) = sigmoid(logit) =~ 1.
@@ -174,9 +180,17 @@ def add_ground_truth_to_proposals_single_image(gt_boxes, proposals):
     gt_logits = gt_logit_value * torch.ones(len(gt_boxes), device=device)
 
     # Concatenating gt_boxes with proposals requires them to have the same fields
-    gt_proposal = Instances(proposals.image_size)
+    gt_proposal = Instances(proposals.image_size, **gt.get_fields())
     gt_proposal.proposal_boxes = gt_boxes
     gt_proposal.objectness_logits = gt_logits
+
+    for key in proposals.get_fields().keys():
+        assert gt_proposal.has(
+            key
+        ), "The attribute '{}' in `proposals` does not exist in `gt`".format(key)
+
+    # NOTE: Instances.cat only use fields from the first item. Extra fields in latter items
+    # will be thrown away.
     new_proposals = Instances.cat([proposals, gt_proposal])
 
     return new_proposals

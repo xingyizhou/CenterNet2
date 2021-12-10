@@ -13,14 +13,17 @@ import argparse
 import logging
 import os
 import sys
+import weakref
 from collections import OrderedDict
 from typing import Optional
 import torch
 from fvcore.nn.precise_bn import get_bn_modules
+from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel
 
 import detectron2.data.transforms as T
 from detectron2.checkpoint import DetectionCheckpointer
+from detectron2.config import CfgNode, LazyConfig
 from detectron2.data import (
     MetadataCatalog,
     build_detection_test_loader,
@@ -36,7 +39,7 @@ from detectron2.modeling import build_model
 from detectron2.solver import build_lr_scheduler, build_optimizer
 from detectron2.utils import comm
 from detectron2.utils.collect_env import collect_env_info
-from detectron2.utils.env import TORCH_VERSION, seed_all_rng
+from detectron2.utils.env import seed_all_rng
 from detectron2.utils.events import CommonMetricPrinter, JSONWriter, TensorboardXWriter
 from detectron2.utils.file_io import PathManager
 from detectron2.utils.logger import setup_logger
@@ -45,12 +48,35 @@ from . import hooks
 from .train_loop import AMPTrainer, SimpleTrainer, TrainerBase
 
 __all__ = [
+    "create_ddp_model",
     "default_argument_parser",
     "default_setup",
     "default_writers",
     "DefaultPredictor",
     "DefaultTrainer",
 ]
+
+
+def create_ddp_model(model, *, fp16_compression=False, **kwargs):
+    """
+    Create a DistributedDataParallel model if there are >1 processes.
+
+    Args:
+        model: a torch.nn.Module
+        fp16_compression: add fp16 compression hooks to the ddp object.
+            See more at https://pytorch.org/docs/stable/ddp_comm_hooks.html#torch.distributed.algorithms.ddp_comm_hooks.default_hooks.fp16_compress_hook
+        kwargs: other arguments of :module:`torch.nn.parallel.DistributedDataParallel`.
+    """  # noqa
+    if comm.get_world_size() == 1:
+        return model
+    if "device_ids" not in kwargs:
+        kwargs["device_ids"] = [comm.get_local_rank()]
+    ddp = DistributedDataParallel(model, **kwargs)
+    if fp16_compression:
+        from torch.distributed.algorithms.ddp_comm_hooks import default as comm_hooks
+
+        ddp.register_comm_hook(state=None, hook=comm_hooks.fp16_compress_hook)
+    return ddp
 
 
 def default_argument_parser(epilog=None):
@@ -106,13 +132,43 @@ Run on multiple machines:
     )
     parser.add_argument(
         "opts",
-        help="Modify config options by adding 'KEY VALUE' pairs at the end of the command. "
-        "See config references at "
-        "https://detectron2.readthedocs.io/modules/config.html#config-references",
+        help="""
+Modify config options at the end of the command. For Yacs configs, use
+space-separated "PATH.KEY VALUE" pairs.
+For python-based LazyConfig, use "path.key=value".
+        """.strip(),
         default=None,
         nargs=argparse.REMAINDER,
     )
     return parser
+
+
+def _try_get_key(cfg, *keys, default=None):
+    """
+    Try select keys from cfg until the first key that exists. Otherwise return default.
+    """
+    if isinstance(cfg, CfgNode):
+        cfg = OmegaConf.create(cfg.dump())
+    for k in keys:
+        none = object()
+        p = OmegaConf.select(cfg, k, default=none)
+        if p is not none:
+            return p
+    return default
+
+
+def _highlight(code, filename):
+    try:
+        import pygments
+    except ImportError:
+        return code
+
+    from pygments.lexers import Python3Lexer, YamlLexer
+    from pygments.formatters import Terminal256Formatter
+
+    lexer = Python3Lexer() if filename.endswith(".py") else YamlLexer()
+    code = pygments.highlight(code, lexer, Terminal256Formatter(style="monokai"))
+    return code
 
 
 def default_setup(cfg, args):
@@ -124,10 +180,10 @@ def default_setup(cfg, args):
     3. Backup the config to the output directory
 
     Args:
-        cfg (CfgNode): the full config to be used
+        cfg (CfgNode or omegaconf.DictConfig): the full config to be used
         args (argparse.NameSpace): the command line arguments to be logged
     """
-    output_dir = cfg.OUTPUT_DIR
+    output_dir = _try_get_key(cfg, "OUTPUT_DIR", "output_dir", "train.output_dir")
     if comm.is_main_process() and output_dir:
         PathManager.mkdirs(output_dir)
 
@@ -142,26 +198,33 @@ def default_setup(cfg, args):
     if hasattr(args, "config_file") and args.config_file != "":
         logger.info(
             "Contents of args.config_file={}:\n{}".format(
-                args.config_file, PathManager.open(args.config_file, "r").read()
+                args.config_file,
+                _highlight(PathManager.open(args.config_file, "r").read(), args.config_file),
             )
         )
 
-    logger.info("Running with full config:\n{}".format(cfg))
     if comm.is_main_process() and output_dir:
         # Note: some of our scripts may expect the existence of
         # config.yaml in output directory
         path = os.path.join(output_dir, "config.yaml")
-        with PathManager.open(path, "w") as f:
-            f.write(cfg.dump())
+        if isinstance(cfg, CfgNode):
+            logger.info("Running with full config:\n{}".format(_highlight(cfg.dump(), ".yaml")))
+            with PathManager.open(path, "w") as f:
+                f.write(cfg.dump())
+        else:
+            LazyConfig.save(cfg, path)
         logger.info("Full config saved to {}".format(path))
 
     # make sure each worker has a different, yet deterministic seed if specified
-    seed_all_rng(None if cfg.SEED < 0 else cfg.SEED + rank)
+    seed = _try_get_key(cfg, "SEED", "train.seed", default=-1)
+    seed_all_rng(None if seed < 0 else seed + rank)
 
     # cudnn benchmark has large overhead. It shouldn't be used considering the small size of
     # typical validation set.
     if not (hasattr(args, "eval_only") and args.eval_only):
-        torch.backends.cudnn.benchmark = cfg.CUDNN_BENCHMARK
+        torch.backends.cudnn.benchmark = _try_get_key(
+            cfg, "CUDNN_BENCHMARK", "train.cudnn_benchmark", default=False
+        )
 
 
 def default_writers(output_dir: str, max_iter: Optional[int] = None):
@@ -177,6 +240,7 @@ def default_writers(output_dir: str, max_iter: Optional[int] = None):
     Returns:
         list[EventWriter]: a list of :class:`EventWriter` objects.
     """
+    PathManager.mkdirs(output_dir)
     return [
         # It may not always print what you want to see, since it prints "common" metrics only.
         CommonMetricPrinter(max_iter),
@@ -197,8 +261,10 @@ class DefaultPredictor:
     3. Apply resizing defined by `cfg.INPUT.{MIN,MAX}_SIZE_TEST`.
     4. Take one input image and produce a single output, instead of a batch.
 
-    If you'd like to do anything more fancy, please refer to its source code
-    as examples to build and use the model manually.
+    This is meant for simple demo purposes, so it does the above steps automatically.
+    This is not meant for benchmarks or running complicated inference logic.
+    If you'd like to do anything more complicated, please refer to its source code as
+    examples to build and use the model manually.
 
     Attributes:
         metadata (Metadata): the metadata of the underlying dataset, obtained from
@@ -311,24 +377,17 @@ class DefaultTrainer(TrainerBase):
         optimizer = self.build_optimizer(cfg, model)
         data_loader = self.build_train_loader(cfg)
 
-        # For training, wrap with DDP. But don't need this for inference.
-        if comm.get_world_size() > 1:
-            model = DistributedDataParallel(
-                model, device_ids=[comm.get_local_rank()], broadcast_buffers=False
-            )
+        model = create_ddp_model(model, broadcast_buffers=False)
         self._trainer = (AMPTrainer if cfg.SOLVER.AMP.ENABLED else SimpleTrainer)(
             model, data_loader, optimizer
         )
 
         self.scheduler = self.build_lr_scheduler(cfg, optimizer)
-        # Assume no other objects need to be checkpointed.
-        # We can later make it checkpoint the stateful hooks
         self.checkpointer = DetectionCheckpointer(
             # Assume you want to save checkpoints together with logs/statistics
             model,
             cfg.OUTPUT_DIR,
-            optimizer=optimizer,
-            scheduler=self.scheduler,
+            trainer=weakref.proxy(self),
         )
         self.start_iter = 0
         self.max_iter = cfg.SOLVER.MAX_ITER
@@ -350,17 +409,11 @@ class DefaultTrainer(TrainerBase):
         Args:
             resume (bool): whether to do resume or not
         """
-        checkpoint = self.checkpointer.resume_or_load(self.cfg.MODEL.WEIGHTS, resume=resume)
+        self.checkpointer.resume_or_load(self.cfg.MODEL.WEIGHTS, resume=resume)
         if resume and self.checkpointer.has_checkpoint():
-            self.start_iter = checkpoint.get("iteration", -1) + 1
             # The checkpoint stores the training iteration that just finished, thus we start
-            # at the next iteration (or iter zero if there's no checkpoint).
-        if isinstance(self.model, DistributedDataParallel):
-            # broadcast loaded data/model from the first rank, because other
-            # machines may not have access to the checkpoint file
-            if TORCH_VERSION >= (1, 7):
-                self.model._sync_params_and_buffers()
-            self.start_iter = comm.all_gather(self.start_iter)[0]
+            # at the next iteration
+            self.start_iter = self.iter + 1
 
     def build_hooks(self):
         """
@@ -440,6 +493,15 @@ class DefaultTrainer(TrainerBase):
         self._trainer.iter = self.iter
         self._trainer.run_step()
 
+    def state_dict(self):
+        ret = super().state_dict()
+        ret["_trainer"] = self._trainer.state_dict()
+        return ret
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        self._trainer.load_state_dict(state_dict["_trainer"])
+
     @classmethod
     def build_model(cls, cfg):
         """
@@ -514,6 +576,9 @@ Alternatively, you can call evaluation functions yourself (see Colab balloon tut
     @classmethod
     def test(cls, cfg, model, evaluators=None):
         """
+        Evaluate the given model. The given model is expected to already contain
+        weights to evaluate.
+
         Args:
             cfg (CfgNode):
             model (nn.Module):

@@ -169,9 +169,9 @@ class Caffe2RPN(Caffe2Compatible, rpn.RPN):
         if self.tensor_mode:
             im_info = images.image_sizes
         else:
-            im_info = torch.Tensor(
-                [[im_sz[0], im_sz[1], torch.Tensor([1.0])] for im_sz in images.image_sizes]
-            ).to(images.tensor.device)
+            im_info = torch.tensor([[im_sz[0], im_sz[1], 1.0] for im_sz in images.image_sizes]).to(
+                images.tensor.device
+            )
         assert isinstance(im_info, torch.Tensor)
 
         rpn_rois_list = []
@@ -299,8 +299,12 @@ class Caffe2ROIPooler(Caffe2Compatible, poolers.ROIPooler):
                 c2_roi_align = torch.ops._caffe2.RoIAlign
                 aligned = self.level_poolers[0].aligned
 
+            x0 = x[0]
+            if x0.is_quantized:
+                x0 = x0.dequantize()
+
             out = c2_roi_align(
-                x[0],
+                x0,
                 pooler_fmt_boxes,
                 order="NCHW",
                 spatial_scale=float(self.level_poolers[0].spatial_scale),
@@ -337,6 +341,9 @@ class Caffe2ROIPooler(Caffe2Compatible, poolers.ROIPooler):
                 c2_roi_align = torch.ops._caffe2.RoIAlign
                 aligned = bool(pooler.aligned)
 
+            if x_level.is_quantized:
+                x_level = x_level.dequantize()
+
             roi_feat_fpn = c2_roi_align(
                 x_level,
                 roi_fpn,
@@ -363,7 +370,7 @@ class Caffe2FastRCNNOutputsInference:
         self.tensor_mode = tensor_mode  # whether the output is caffe2 tensor mode
 
     def __call__(self, box_predictor, predictions, proposals):
-        """ equivalent to FastRCNNOutputLayers.inference """
+        """equivalent to FastRCNNOutputLayers.inference"""
         num_classes = box_predictor.num_classes
         score_thresh = box_predictor.test_score_thresh
         nms_thresh = box_predictor.test_nms_thresh
@@ -402,7 +409,7 @@ class Caffe2FastRCNNOutputsInference:
             im_info = proposals[0].image_size
             rois = rois.tensor
         else:
-            im_info = torch.Tensor(
+            im_info = torch.tensor(
                 [[sz[0], sz[1], 1.0] for sz in [x.image_size for x in proposals]]
             )
             batch_ids = cat(
@@ -494,7 +501,7 @@ class Caffe2FastRCNNOutputsInference:
 
 class Caffe2MaskRCNNInference:
     def __call__(self, pred_mask_logits, pred_instances):
-        """ equivalent to mask_head.mask_rcnn_inference """
+        """equivalent to mask_head.mask_rcnn_inference"""
         if all(isinstance(x, InstancesList) for x in pred_instances):
             assert len(pred_instances) == 1
             mask_probs_pred = pred_mask_logits.sigmoid()

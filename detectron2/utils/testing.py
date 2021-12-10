@@ -7,7 +7,7 @@ from detectron2 import model_zoo
 from detectron2.data import DatasetCatalog
 from detectron2.data.detection_utils import read_image
 from detectron2.modeling import build_model
-from detectron2.structures import Boxes, Instances
+from detectron2.structures import Boxes, Instances, ROIMasks
 from detectron2.utils.file_io import PathManager
 
 
@@ -55,7 +55,9 @@ def get_sample_coco_image(tensor=True):
             raise FileNotFoundError()
     except IOError:
         # for public CI to run
-        file_name = "http://images.cocodataset.org/train2017/000000000009.jpg"
+        file_name = PathManager.get_local_path(
+            "http://images.cocodataset.org/train2017/000000000009.jpg"
+        )
     ret = read_image(file_name, format="BGR")
     if tensor:
         ret = torch.from_numpy(np.ascontiguousarray(ret.transpose(2, 0, 1)))
@@ -66,6 +68,9 @@ def convert_scripted_instances(instances):
     """
     Convert a scripted Instances object to a regular :class:`Instances` object
     """
+    assert hasattr(
+        instances, "image_size"
+    ), f"Expect an Instances object, but got {type(instances)}!"
     ret = Instances(instances.image_size)
     for name in instances._field_names:
         val = getattr(instances, "_" + name, None)
@@ -104,7 +109,7 @@ def assert_instances_allclose(input, other, *, rtol=1e-5, msg="", size_as_tensor
 
     for f in fields:
         val1, val2 = input.get(f), other.get(f)
-        if isinstance(val1, Boxes):
+        if isinstance(val1, (Boxes, ROIMasks)):
             # boxes in the range of O(100) and can have a larger tolerance
             assert torch.allclose(val1.tensor, val2.tensor, atol=100 * rtol), (
                 msg + f"Field {f} differs too much!"

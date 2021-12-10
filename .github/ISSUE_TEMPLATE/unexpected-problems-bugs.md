@@ -1,6 +1,6 @@
 ---
 name: "😩 Unexpected behaviors"
-about: Run into unexpected behaviors when using detectron2
+about: Report unexpected behaviors when using detectron2
 title: Please read & provide the following
 
 ---
@@ -27,19 +27,17 @@ git rev-parse HEAD; git diff
 
 ## Expected behavior:
 
-If there are no obvious error in "what you observed" provided above,
+If there are no obvious crash in "full logs" provided above,
 please tell us the expected behavior.
 
-If you expect the model to converge / work better, note that we do not give suggestions on how to train a new model.
-Only in one of the two conditions we will help with it:
-(1) You're unable to reproduce the results in detectron2 model zoo.
-(2) It indicates a detectron2 bug.
+If you expect a model to converge / work better, we do not help with such issues, unless
+a model fails to reproduce the results in detectron2 model zoo, or proves existence of bugs.
 
 ## Environment:
 
 Paste the output of the following command:
 ```
-wget -nc -q https://github.com/facebookresearch/detectron2/raw/master/detectron2/utils/collect_env.py && python collect_env.py
+wget -nc -nv https://github.com/facebookresearch/detectron2/raw/main/detectron2/utils/collect_env.py && python collect_env.py
 ```
 
 If your issue looks like an installation issue / environment issue,

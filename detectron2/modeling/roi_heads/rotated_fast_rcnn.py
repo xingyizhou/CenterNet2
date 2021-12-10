@@ -54,10 +54,10 @@ def fast_rcnn_inference_rotated(
             boxes for each image. Element i has shape (Ri, K * 5) if doing
             class-specific regression, or (Ri, 5) if doing class-agnostic
             regression, where Ri is the number of predicted objects for image i.
-            This is compatible with the output of :meth:`FastRCNNOutputs.predict_boxes`.
+            This is compatible with the output of :meth:`FastRCNNOutputLayers.predict_boxes`.
         scores (list[Tensor]): A list of Tensors of predicted class scores for each image.
             Element i has shape (Ri, K + 1), where Ri is the number of predicted objects
-            for image i. Compatible with the output of :meth:`FastRCNNOutputs.predict_probs`.
+            for image i. Compatible with the output of :meth:`FastRCNNOutputLayers.predict_probs`.
         image_shapes (list[tuple]): A list of (width, height) tuples for each image in the batch.
         score_thresh (float): Only return detections with a confidence score exceeding this
             threshold.
@@ -234,9 +234,8 @@ class RROIHeads(StandardROIHeads):
                    then the ground-truth box is random)
                 - gt_classes: the ground-truth classification lable for each proposal
         """
-        gt_boxes = [x.gt_boxes for x in targets]
         if self.proposal_append_gt:
-            proposals = add_ground_truth_to_proposals(gt_boxes, proposals)
+            proposals = add_ground_truth_to_proposals(targets, proposals)
 
         proposals_with_gt = []
 

@@ -1,6 +1,8 @@
 # Use Models
 
-Models (and their sub-models) in detectron2 are built by
+## Build Models from Yacs Config
+From a yacs config object,
+models (and their sub-models) can be built by
 functions such as `build_model`, `build_backbone`, `build_roi_heads`:
 ```python
 from detectron2.modeling import build_model
@@ -69,7 +71,7 @@ The dict may contain the following keys:
 * "image": `Tensor` in (C, H, W) format. The meaning of channels are defined by `cfg.INPUT.FORMAT`.
   Image normalization, if any, will be performed inside the model using
   `cfg.MODEL.PIXEL_{MEAN,STD}`.
-* "height", "width": the **desired** output height and width, which is not necessarily the same
+* "height", "width": the **desired** output height and width **in inference**, which is not necessarily the same
   as the height or width of the `image` field.
   For example, the `image` field contains the resized image, if resize is used as a preprocessing step.
   But you may want the outputs to be in **original** resolution.

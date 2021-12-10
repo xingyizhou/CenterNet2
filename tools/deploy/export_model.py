@@ -2,21 +2,16 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 import argparse
 import os
-import onnx
+from typing import Dict, List, Tuple
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
+import detectron2.data.transforms as T
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
-from detectron2.data import build_detection_test_loader
+from detectron2.data import build_detection_test_loader, detection_utils
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset, print_csv_format
-from detectron2.export import (
-    Caffe2Tracer,
-    TracingAdapter,
-    add_export_config,
-    dump_torchscript_IR,
-    scripting_with_instances,
-)
+from detectron2.export import TracingAdapter, dump_torchscript_IR, scripting_with_instances
 from detectron2.modeling import GeneralizedRCNN, RetinaNet, build_model
 from detectron2.modeling.postprocessing import detector_postprocess
 from detectron2.projects.point_rend import add_pointrend_config
@@ -30,7 +25,6 @@ def setup_cfg(args):
     cfg = get_cfg()
     # cuda context is initialized before creating dataloader, so we don't fork anymore
     cfg.DATALOADER.NUM_WORKERS = 0
-    cfg = add_export_config(cfg)
     add_pointrend_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
@@ -39,6 +33,8 @@ def setup_cfg(args):
 
 
 def export_caffe2_tracing(cfg, torch_model, inputs):
+    from detectron2.export import Caffe2Tracer
+
     tracer = Caffe2Tracer(cfg, torch_model, inputs)
     if args.format == "caffe2":
         caffe2_model = tracer.export_caffe2()
@@ -47,6 +43,8 @@ def export_caffe2_tracing(cfg, torch_model, inputs):
         caffe2_model.save_graph(os.path.join(args.output, "model.svg"), inputs=inputs)
         return caffe2_model
     elif args.format == "onnx":
+        import onnx
+
         onnx_model = tracer.export_onnx()
         onnx.save(onnx_model, os.path.join(args.output, "model.onnx"))
     elif args.format == "torchscript":
@@ -70,7 +68,30 @@ def export_scripting(torch_model):
         "pred_keypoint_heatmaps": torch.Tensor,
     }
     assert args.format == "torchscript", "Scripting only supports torchscript format."
-    ts_model = scripting_with_instances(torch_model, fields)
+
+    class ScriptableAdapterBase(nn.Module):
+        # Use this adapter to workaround https://github.com/pytorch/pytorch/issues/46944
+        # by not retuning instances but dicts. Otherwise the exported model is not deployable
+        def __init__(self):
+            super().__init__()
+            self.model = torch_model
+            self.eval()
+
+    if isinstance(torch_model, GeneralizedRCNN):
+
+        class ScriptableAdapter(ScriptableAdapterBase):
+            def forward(self, inputs: Tuple[Dict[str, torch.Tensor]]) -> List[Dict[str, Tensor]]:
+                instances = self.model.inference(inputs, do_postprocess=False)
+                return [i.get_fields() for i in instances]
+
+    else:
+
+        class ScriptableAdapter(ScriptableAdapterBase):
+            def forward(self, inputs: Tuple[Dict[str, torch.Tensor]]) -> List[Dict[str, Tensor]]:
+                instances = self.model(inputs)
+                return [i.get_fields() for i in instances]
+
+    ts_model = scripting_with_instances(ScriptableAdapter(), fields)
     with PathManager.open(os.path.join(args.output, "model.ts"), "wb") as f:
         torch.jit.save(ts_model, f)
     dump_torchscript_IR(ts_model, args.output)
@@ -102,9 +123,8 @@ def export_tracing(torch_model, inputs):
             torch.jit.save(ts_model, f)
         dump_torchscript_IR(ts_model, args.output)
     elif args.format == "onnx":
-        # NOTE onnx export currently failing in pytorch
         with PathManager.open(os.path.join(args.output, "model.onnx"), "wb") as f:
-            torch.onnx.export(traceable_model, (image,), f)
+            torch.onnx.export(traceable_model, (image,), f, opset_version=11)
     logger.info("Inputs schema: " + str(traceable_model.inputs_schema))
     logger.info("Outputs schema: " + str(traceable_model.outputs_schema))
 
@@ -126,21 +146,47 @@ def export_tracing(torch_model, inputs):
     return eval_wrapper
 
 
+def get_sample_inputs(args):
+
+    if args.sample_image is None:
+        # get a first batch from dataset
+        data_loader = build_detection_test_loader(cfg, cfg.DATASETS.TEST[0])
+        first_batch = next(iter(data_loader))
+        return first_batch
+    else:
+        # get a sample data
+        original_image = detection_utils.read_image(args.sample_image, format=cfg.INPUT.FORMAT)
+        # Do same preprocessing as DefaultPredictor
+        aug = T.ResizeShortestEdge(
+            [cfg.INPUT.MIN_SIZE_TEST, cfg.INPUT.MIN_SIZE_TEST], cfg.INPUT.MAX_SIZE_TEST
+        )
+        height, width = original_image.shape[:2]
+        image = aug.get_transform(original_image).apply_image(original_image)
+        image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
+
+        inputs = {"image": image, "height": height, "width": width}
+
+        # Sample ready
+        sample_inputs = [inputs]
+        return sample_inputs
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export a model for deployment.")
     parser.add_argument(
         "--format",
         choices=["caffe2", "onnx", "torchscript"],
         help="output format",
-        default="caffe2",
+        default="torchscript",
     )
     parser.add_argument(
         "--export-method",
         choices=["caffe2_tracing", "tracing", "scripting"],
         help="Method to export models",
-        default="caffe2_tracing",
+        default="tracing",
     )
     parser.add_argument("--config-file", default="", metavar="FILE", help="path to config file")
+    parser.add_argument("--sample-image", default=None, type=str, help="sample image for input")
     parser.add_argument("--run-eval", action="store_true")
     parser.add_argument("--output", help="output directory for the converted model")
     parser.add_argument(
@@ -163,17 +209,16 @@ if __name__ == "__main__":
     DetectionCheckpointer(torch_model).resume_or_load(cfg.MODEL.WEIGHTS)
     torch_model.eval()
 
-    # get a sample data
-    data_loader = build_detection_test_loader(cfg, cfg.DATASETS.TEST[0])
-    first_batch = next(iter(data_loader))
+    # get sample data
+    sample_inputs = get_sample_inputs(args)
 
     # convert and save model
     if args.export_method == "caffe2_tracing":
-        exported_model = export_caffe2_tracing(cfg, torch_model, first_batch)
+        exported_model = export_caffe2_tracing(cfg, torch_model, sample_inputs)
     elif args.export_method == "scripting":
         exported_model = export_scripting(torch_model)
     elif args.export_method == "tracing":
-        exported_model = export_tracing(torch_model, first_batch)
+        exported_model = export_tracing(torch_model, sample_inputs)
 
     # run evaluation with the converted model
     if args.run_eval:

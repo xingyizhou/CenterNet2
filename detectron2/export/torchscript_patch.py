@@ -11,7 +11,7 @@ from torch import nn
 
 # need some explicit imports due to https://github.com/pytorch/pytorch/issues/38964
 import detectron2  # noqa F401
-from detectron2.structures import Instances
+from detectron2.structures import Boxes, Instances
 from detectron2.utils.env import _import_file
 
 _counter = 0
@@ -113,10 +113,11 @@ def _gen_instance_class(fields):
     cls_name = "ScriptedInstances{}".format(_counter)
 
     field_names = tuple(x.name for x in fields)
+    extra_args = ", ".join([f"{f.name}: Optional[{f.annotation}] = None" for f in fields])
     lines.append(
         f"""
 class {cls_name}:
-    def __init__(self, image_size: Tuple[int, int]):
+    def __init__(self, image_size: Tuple[int, int], {extra_args}):
         self.image_size = image_size
         self._field_names = {field_names}
 """
@@ -124,7 +125,7 @@ class {cls_name}:
 
     for f in fields:
         lines.append(
-            indent(2, f"self._{f.name} = torch.jit.annotate(Optional[{f.annotation}], None)")
+            indent(2, f"self._{f.name} = torch.jit.annotate(Optional[{f.annotation}], {f.name})")
         )
 
     for f in fields:
@@ -135,7 +136,7 @@ class {cls_name}:
         # has to use a local for type refinement
         # https://pytorch.org/docs/stable/jit_language_reference.html#optional-type-refinement
         t = self._{f.name}
-        assert t is not None
+        assert t is not None, "{f.name} is None and cannot be accessed!"
         return t
 
     @{f.name}.setter
@@ -184,10 +185,11 @@ class {cls_name}:
     )
 
     # support method `to`
+    none_args = ", None" * len(fields)
     lines.append(
         f"""
     def to(self, device: torch.device) -> "{cls_name}":
-        ret = {cls_name}(self.image_size)
+        ret = {cls_name}(self.image_size{none_args})
 """
     )
     for f in fields:
@@ -210,10 +212,11 @@ class {cls_name}:
     )
 
     # support method `getitem`
+    none_args = ", None" * len(fields)
     lines.append(
         f"""
     def __getitem__(self, item) -> "{cls_name}":
-        ret = {cls_name}(self.image_size)
+        ret = {cls_name}(self.image_size{none_args})
 """
     )
     for f in fields:
@@ -228,6 +231,58 @@ class {cls_name}:
         """
         return ret
 """
+    )
+
+    # support method `cat`
+    # this version does not contain checks that all instances have same size and fields
+    none_args = ", None" * len(fields)
+    lines.append(
+        f"""
+    def cat(self, instances: List["{cls_name}"]) -> "{cls_name}":
+        ret = {cls_name}(self.image_size{none_args})
+"""
+    )
+    for f in fields:
+        lines.append(
+            f"""
+        t = self._{f.name}
+        if t is not None:
+            values: List[{f.annotation}] = [x.{f.name} for x in instances]
+            if torch.jit.isinstance(t, torch.Tensor):
+                ret._{f.name} = torch.cat(values, dim=0)
+            else:
+                ret._{f.name} = t.cat(values)
+"""
+        )
+    lines.append(
+        """
+        return ret"""
+    )
+
+    # support method `get_fields()`
+    lines.append(
+        """
+    def get_fields(self) -> Dict[str, Tensor]:
+        ret = {}
+    """
+    )
+    for f in fields:
+        if f.type_ == Boxes:
+            stmt = "t.tensor"
+        elif f.type_ == torch.Tensor:
+            stmt = "t"
+        else:
+            stmt = f'assert False, "unsupported type {str(f.type_)}"'
+        lines.append(
+            f"""
+        t = self._{f.name}
+        if t is not None:
+            ret["{f.name}"] = {stmt}
+        """
+        )
+    lines.append(
+        """
+        return ret"""
     )
     return cls_name, os.linesep.join(lines)
 

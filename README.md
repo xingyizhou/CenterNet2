@@ -1,6 +1,7 @@
 # Probabilistic two-stage detection
 Two-stage object detectors that use class-agnostic one-stage detectors as the proposal network.
 
+
 <p align="center"> <img src='projects/CenterNet2/centernet2_docs/centernet2_teaser.jpg' align="center" height="150px"> </p>
 
 > [**Probabilistic two-stage detection**](http://arxiv.org/abs/2103.07461),            
@@ -57,8 +58,6 @@ More models and details can be found in the [MODEL_ZOO](projects/CenterNet2/cent
 
 Our project is developed on [detectron2](https://github.com/facebookresearch/detectron2). Please follow the official detectron2 [installation](https://github.com/facebookresearch/detectron2/blob/master/INSTALL.md). All our code is under `projects/CenterNet2/`. In theory, you should be able to copy-paste `projects/CenterNet2/` to the latest detectron2 release or your own detectron2 repo to run our project. There might be API changes in future detectron2 releases that make it incompatible. 
 
-## Demo
-
 We use the default detectron2 demo script. To run inference on an image folder using our pre-trained model, run
 
 ~~~
@@ -68,6 +67,7 @@ python projects/CenterNet2/demo/demo.py --config-file projects/CenterNet2/config
 ## Benchmark evaluation and training
 
 Please check detectron2 [GETTING_STARTED.md](https://github.com/facebookresearch/detectron2/blob/master/GETTING_STARTED.md) for running evaluation and training. Our config files are under `projects/CenterNet2/configs` and the pre-trained models are in the [MODEL_ZOO](projects/CenterNet2/centernet2_docs/MODEL_ZOO.md).
+
 
 ## License
 

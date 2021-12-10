@@ -143,7 +143,7 @@ class ROIHeads(torch.nn.Module):
         batch_size_per_image,
         positive_fraction,
         proposal_matcher,
-        proposal_append_gt=True
+        proposal_append_gt=True,
     ):
         """
         NOTE: this interface is experimental.
@@ -243,7 +243,6 @@ class ROIHeads(torch.nn.Module):
 
                 Other fields such as "gt_classes", "gt_masks", that's included in `targets`.
         """
-        gt_boxes = [x.gt_boxes for x in targets]
         # Augment proposals with ground-truth boxes.
         # In the case of learned proposals (e.g., RPN), when training starts
         # the proposals will be low quality due to random initialization.
@@ -256,7 +255,7 @@ class ROIHeads(torch.nn.Module):
         # convergence and empirically improves box AP on COCO by about 0.5
         # points (under one tested configuration).
         if self.proposal_append_gt:
-            proposals = add_ground_truth_to_proposals(gt_boxes, proposals)
+            proposals = add_ground_truth_to_proposals(targets, proposals)
 
         proposals_with_gt = []
 
@@ -357,7 +356,7 @@ class Res5ROIHeads(ROIHeads):
         res5: nn.Module,
         box_predictor: nn.Module,
         mask_head: Optional[nn.Module] = None,
-        **kwargs
+        **kwargs,
     ):
         """
         NOTE: this interface is experimental.
@@ -453,11 +452,17 @@ class Res5ROIHeads(ROIHeads):
         )
         return nn.Sequential(*blocks), out_channels
 
-    def _shared_roi_transform(self, features, boxes):
+    def _shared_roi_transform(self, features: List[torch.Tensor], boxes: List[Boxes]):
         x = self.pooler(features, boxes)
         return self.res5(x)
 
-    def forward(self, images, features, proposals, targets=None):
+    def forward(
+        self,
+        images: ImageList,
+        features: Dict[str, torch.Tensor],
+        proposals: List[Instances],
+        targets: Optional[List[Instances]] = None,
+    ):
         """
         See :meth:`ROIHeads.forward`.
         """
@@ -494,7 +499,9 @@ class Res5ROIHeads(ROIHeads):
             pred_instances = self.forward_with_given_boxes(features, pred_instances)
             return pred_instances, {}
 
-    def forward_with_given_boxes(self, features, instances):
+    def forward_with_given_boxes(
+        self, features: Dict[str, torch.Tensor], instances: List[Instances]
+    ) -> List[Instances]:
         """
         Use the given boxes in `instances` to produce other (non-box) per-ROI outputs.
 
@@ -512,8 +519,8 @@ class Res5ROIHeads(ROIHeads):
         assert instances[0].has("pred_boxes") and instances[0].has("pred_classes")
 
         if self.mask_on:
-            features = [features[f] for f in self.in_features]
-            x = self._shared_roi_transform(features, [x.pred_boxes for x in instances])
+            feature_list = [features[f] for f in self.in_features]
+            x = self._shared_roi_transform(feature_list, [x.pred_boxes for x in instances])
             return self.mask_head(x, instances)
         else:
             return instances
@@ -547,7 +554,7 @@ class StandardROIHeads(ROIHeads):
         keypoint_pooler: Optional[ROIPooler] = None,
         keypoint_head: Optional[nn.Module] = None,
         train_on_pred_boxes: bool = False,
-        **kwargs
+        **kwargs,
     ):
         """
         NOTE: this interface is experimental.
@@ -759,7 +766,7 @@ class StandardROIHeads(ROIHeads):
                 "pred_boxes" and "pred_classes" to exist.
 
         Returns:
-            instances (list[Instances]):
+            list[Instances]:
                 the same `Instances` objects, with extra
                 fields such as `pred_masks` or `pred_keypoints`.
         """
@@ -866,5 +873,5 @@ class StandardROIHeads(ROIHeads):
             boxes = [x.proposal_boxes if self.training else x.pred_boxes for x in instances]
             features = self.keypoint_pooler(features, boxes)
         else:
-            features = dict([(f, features[f]) for f in self.keypoint_in_features])
+            features = {f: features[f] for f in self.keypoint_in_features}
         return self.keypoint_head(features, instances)

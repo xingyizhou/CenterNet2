@@ -1,3 +1,4 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
 import dataclasses
 import logging
 from collections import abc
@@ -38,7 +39,8 @@ def instantiate(cfg):
     "_target_" and arguments.
 
     Args:
-        cfg:
+        cfg: a dict-like object with "_target_" that defines the caller, and
+            other keys that define the arguments
 
     Returns:
         object instantiated by cfg
@@ -67,7 +69,7 @@ def instantiate(cfg):
         else:
             try:
                 cls_name = cls.__module__ + "." + cls.__qualname__
-            except AttributeError:
+            except Exception:
                 # target could be anything, so the above could fail
                 cls_name = str(cls)
         assert callable(cls), f"_target_ {cls} does not define a callable object"

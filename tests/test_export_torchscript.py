@@ -2,6 +2,7 @@
 
 import json
 import os
+import random
 import tempfile
 import unittest
 import torch
@@ -26,20 +27,25 @@ from detectron2.utils.testing import (
     random_boxes,
 )
 
-
 """
 https://detectron2.readthedocs.io/tutorials/deployment.html
 contains some explanations of this file.
 """
 
+SLOW_PUBLIC_CPU_TEST = unittest.skipIf(
+    os.environ.get("CI") and not torch.cuda.is_available(),
+    "The test is too slow on CPUs and will be executed on CircleCI's GPU jobs.",
+)
 
-@unittest.skipIf(os.environ.get("CI") or TORCH_VERSION < (1, 8), "Insufficient Pytorch version")
+
 class TestScripting(unittest.TestCase):
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
-    def testMaskRCNN(self):
+    def testMaskRCNNFPN(self):
         self._test_rcnn_model("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
 
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    @SLOW_PUBLIC_CPU_TEST
+    def testMaskRCNNC4(self):
+        self._test_rcnn_model("COCO-InstanceSegmentation/mask_rcnn_R_50_C4_3x.yaml")
+
     def testRetinaNet(self):
         self._test_retinanet_model("COCO-Detection/retinanet_R_50_FPN_3x.yaml")
 
@@ -57,7 +63,10 @@ class TestScripting(unittest.TestCase):
         }
         script_model = scripting_with_instances(model, fields)
 
-        inputs = [{"image": get_sample_coco_image()}]
+        # Test that batch inference with different shapes are supported
+        image = get_sample_coco_image()
+        small_image = nn.functional.interpolate(image, scale_factor=0.5)
+        inputs = [{"image": image}, {"image": small_image}]
         with torch.no_grad():
             instance = model.inference(inputs, do_postprocess=False)[0]
             scripted_instance = script_model.inference(inputs, do_postprocess=False)[0]
@@ -75,7 +84,7 @@ class TestScripting(unittest.TestCase):
         script_model = scripting_with_instances(model, fields)
 
         img = get_sample_coco_image()
-        inputs = [{"image": img}]
+        inputs = [{"image": img}] * 2
         with torch.no_grad():
             instance = model(inputs)[0]["instances"]
             scripted_instance = convert_scripted_instances(script_model(inputs)[0])
@@ -85,37 +94,78 @@ class TestScripting(unittest.TestCase):
         # https://github.com/pytorch/pytorch/issues/46944
 
 
-@unittest.skipIf(os.environ.get("CI") or TORCH_VERSION < (1, 8), "Insufficient Pytorch version")
+# TODO: this test requires manifold access, see: T88318502
 class TestTracing(unittest.TestCase):
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
-    def testMaskRCNN(self):
+    def testMaskRCNNFPN(self):
         def inference_func(model, image):
             inputs = [{"image": image}]
             return model.inference(inputs, do_postprocess=False)[0]
 
         self._test_model("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml", inference_func)
 
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def testMaskRCNNFPN_with_postproc(self):
+        def inference_func(model, image):
+            inputs = [{"image": image, "height": image.shape[1], "width": image.shape[2]}]
+            return model.inference(inputs, do_postprocess=True)[0]["instances"]
+
+        self._test_model("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml", inference_func)
+
+    @SLOW_PUBLIC_CPU_TEST
+    def testMaskRCNNC4(self):
+        def inference_func(model, image):
+            inputs = [{"image": image}]
+            return model.inference(inputs, do_postprocess=False)[0]
+
+        self._test_model("COCO-InstanceSegmentation/mask_rcnn_R_50_C4_3x.yaml", inference_func)
+
+    @SLOW_PUBLIC_CPU_TEST
+    def testCascadeRCNN(self):
+        def inference_func(model, image):
+            inputs = [{"image": image}]
+            return model.inference(inputs, do_postprocess=False)[0]
+
+        self._test_model("Misc/cascade_mask_rcnn_R_50_FPN_3x.yaml", inference_func)
+
+    # bug fixed by https://github.com/pytorch/pytorch/pull/67734
+    @unittest.skipIf(TORCH_VERSION == (1, 10) and os.environ.get("CI"), "1.10 has bugs.")
     def testRetinaNet(self):
         def inference_func(model, image):
             return model.forward([{"image": image}])[0]["instances"]
 
         self._test_model("COCO-Detection/retinanet_R_50_FPN_3x.yaml", inference_func)
 
-    def _test_model(self, config_path, inference_func):
+    def _test_model(self, config_path, inference_func, batch=1):
         model = model_zoo.get(config_path, trained=True)
         image = get_sample_coco_image()
+        inputs = tuple(image.clone() for _ in range(batch))
 
-        wrapper = TracingAdapter(model, image, inference_func)
+        wrapper = TracingAdapter(model, inputs, inference_func)
         wrapper.eval()
         with torch.no_grad():
-            small_image = nn.functional.interpolate(image, scale_factor=0.5)
-            # trace with a different image, and the trace must still work
-            traced_model = torch.jit.trace(wrapper, (small_image,))
+            # trace with smaller images, and the trace must still work
+            trace_inputs = tuple(
+                nn.functional.interpolate(image, scale_factor=random.uniform(0.5, 0.7))
+                for _ in range(batch)
+            )
+            traced_model = torch.jit.trace(wrapper, trace_inputs)
 
-            output = inference_func(model, image)
-            traced_output = wrapper.outputs_schema(traced_model(image))
-        assert_instances_allclose(output, traced_output, size_as_tensor=True)
+            outputs = inference_func(model, *inputs)
+            traced_outputs = wrapper.outputs_schema(traced_model(*inputs))
+        if batch > 1:
+            for output, traced_output in zip(outputs, traced_outputs):
+                assert_instances_allclose(output, traced_output, size_as_tensor=True)
+        else:
+            assert_instances_allclose(outputs, traced_outputs, size_as_tensor=True)
+
+    @SLOW_PUBLIC_CPU_TEST
+    def testMaskRCNNFPN_batched(self):
+        def inference_func(model, image1, image2):
+            inputs = [{"image": image1}, {"image": image2}]
+            return model.inference(inputs, do_postprocess=False)
+
+        self._test_model(
+            "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml", inference_func, batch=2
+        )
 
     def testKeypointHead(self):
         class M(nn.Module):
@@ -177,6 +227,21 @@ class TestTorchscriptUtils(unittest.TestCase):
                 fname = os.path.join(d, name + ".txt")
                 self.assertTrue(os.stat(fname).st_size > 0, fname)
 
+    def test_dump_IR_function(self):
+        @torch.jit.script
+        def gunc(x, y):
+            return x + y
+
+        def func(x, y):
+            return x + y + gunc(x, y)
+
+        ts_model = torch.jit.trace(func, (torch.rand(3), torch.rand(3)))
+        with tempfile.TemporaryDirectory(prefix="detectron2_test") as d:
+            dump_torchscript_IR(ts_model, d)
+            for name in ["model_ts_code", "model_ts_IR", "model_ts_IR_inlined"]:
+                fname = os.path.join(d, name + ".txt")
+                self.assertTrue(os.stat(fname).st_size > 0, fname)
+
     def test_flatten_basic(self):
         obj = [3, ([5, 6], {"name": [7, 9], "name2": 3})]
         res, schema = flatten_to_tuple(obj)
@@ -211,3 +276,21 @@ class TestTorchscriptUtils(unittest.TestCase):
         assert_instances_allclose(new_obj[1][1], inst, rtol=0.0, size_as_tensor=True)
 
         self._check_schema(schema)
+
+    def test_allow_non_tensor(self):
+        data = (torch.tensor([5, 8]), 3)  # contains non-tensor
+
+        class M(nn.Module):
+            def forward(self, input, number):
+                return input
+
+        model = M()
+        with self.assertRaisesRegex(ValueError, "must only contain tensors"):
+            adap = TracingAdapter(model, data, allow_non_tensor=False)
+
+        adap = TracingAdapter(model, data, allow_non_tensor=True)
+        _ = adap(*adap.flattened_inputs)
+
+        newdata = (data[0].clone(),)
+        with self.assertRaisesRegex(ValueError, "cannot generalize"):
+            _ = adap(*newdata)

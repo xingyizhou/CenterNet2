@@ -22,6 +22,7 @@ from .meta_arch import (
     SemanticSegmentor,
     build_model,
     build_sem_seg_head,
+    FCOS,
 )
 from .postprocessing import detector_postprocess
 from .proposal_generator import (
@@ -46,6 +47,13 @@ from .roi_heads import (
     build_roi_heads,
 )
 from .test_time_augmentation import DatasetMapperTTA, GeneralizedRCNNWithTTA
+from .mmdet_wrapper import MMDetBackbone, MMDetDetector
 
 _EXCLUDE = {"ShapeSpec"}
 __all__ = [k for k in globals().keys() if k not in _EXCLUDE and not k.startswith("_")]
+
+
+from detectron2.utils.env import fixup_module_metadata
+
+fixup_module_metadata(__name__, globals(), __all__)
+del fixup_module_metadata

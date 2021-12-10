@@ -5,11 +5,16 @@ Implement many useful :class:`Augmentation`.
 """
 import numpy as np
 import sys
+from typing import Tuple
+import torch
 from fvcore.transforms.transform import (
     BlendTransform,
     CropTransform,
     HFlipTransform,
     NoOpTransform,
+    PadTransform,
+    Transform,
+    TransformList,
     VFlipTransform,
 )
 from PIL import Image
@@ -18,6 +23,7 @@ from .augmentation import Augmentation, _transform_to_aug
 from .transform import ExtentTransform, ResizeTransform, RotationTransform
 
 __all__ = [
+    "FixedSizeCrop",
     "RandomApply",
     "RandomBrightness",
     "RandomContrast",
@@ -28,6 +34,7 @@ __all__ = [
     "RandomLighting",
     "RandomRotation",
     "Resize",
+    "ResizeScale",
     "ResizeShortestEdge",
     "RandomCrop_CategoryAreaConstraint",
 ]
@@ -100,7 +107,7 @@ class RandomFlip(Augmentation):
 
 
 class Resize(Augmentation):
-    """ Resize image to a fixed target size"""
+    """Resize image to a fixed target size"""
 
     def __init__(self, shape, interp=Image.BILINEAR):
         """
@@ -121,10 +128,13 @@ class Resize(Augmentation):
 
 class ResizeShortestEdge(Augmentation):
     """
-    Scale the shorter edge to the given size, with a limit of `max_size` on the longer edge.
+    Resize the image while keeping the aspect ratio unchanged.
+    It attempts to scale the shorter edge to the given `short_edge_length`,
+    as long as the longer edge does not exceed `max_size`.
     If `max_size` is reached, then downscale so that the longer edge does not exceed max_size.
     """
 
+    @torch.jit.unused
     def __init__(
         self, short_edge_length, max_size=sys.maxsize, sample_style="range", interp=Image.BILINEAR
     ):
@@ -149,6 +159,7 @@ class ResizeShortestEdge(Augmentation):
             )
         self._init(locals())
 
+    @torch.jit.unused
     def get_transform(self, image):
         h, w = image.shape[:2]
         if self.is_range:
@@ -158,18 +169,80 @@ class ResizeShortestEdge(Augmentation):
         if size == 0:
             return NoOpTransform()
 
-        scale = size * 1.0 / min(h, w)
+        newh, neww = ResizeShortestEdge.get_output_shape(h, w, size, self.max_size)
+        return ResizeTransform(h, w, newh, neww, self.interp)
+
+    @staticmethod
+    def get_output_shape(
+        oldh: int, oldw: int, short_edge_length: int, max_size: int
+    ) -> Tuple[int, int]:
+        """
+        Compute the output size given input size and target short edge length.
+        """
+        h, w = oldh, oldw
+        size = short_edge_length * 1.0
+        scale = size / min(h, w)
         if h < w:
             newh, neww = size, scale * w
         else:
             newh, neww = scale * h, size
-        if max(newh, neww) > self.max_size:
-            scale = self.max_size * 1.0 / max(newh, neww)
+        if max(newh, neww) > max_size:
+            scale = max_size * 1.0 / max(newh, neww)
             newh = newh * scale
             neww = neww * scale
         neww = int(neww + 0.5)
         newh = int(newh + 0.5)
-        return ResizeTransform(h, w, newh, neww, self.interp)
+        return (newh, neww)
+
+
+class ResizeScale(Augmentation):
+    """
+    Takes target size as input and randomly scales the given target size between `min_scale`
+    and `max_scale`. It then scales the input image such that it fits inside the scaled target
+    box, keeping the aspect ratio constant.
+    This implements the resize part of the Google's 'resize_and_crop' data augmentation:
+    https://github.com/tensorflow/tpu/blob/master/models/official/detection/utils/input_utils.py#L127
+    """
+
+    def __init__(
+        self,
+        min_scale: float,
+        max_scale: float,
+        target_height: int,
+        target_width: int,
+        interp: int = Image.BILINEAR,
+    ):
+        """
+        Args:
+            min_scale: minimum image scale range.
+            max_scale: maximum image scale range.
+            target_height: target image height.
+            target_width: target image width.
+            interp: image interpolation method.
+        """
+        super().__init__()
+        self._init(locals())
+
+    def _get_resize(self, image: np.ndarray, scale: float) -> Transform:
+        input_size = image.shape[:2]
+
+        # Compute new target size given a scale.
+        target_size = (self.target_height, self.target_width)
+        target_scale_size = np.multiply(target_size, scale)
+
+        # Compute actual rescaling applied to input image and output size.
+        output_scale = np.minimum(
+            target_scale_size[0] / input_size[0], target_scale_size[1] / input_size[1]
+        )
+        output_size = np.round(np.multiply(input_size, output_scale)).astype(int)
+
+        return ResizeTransform(
+            input_size[0], input_size[1], output_size[0], output_size[1], self.interp
+        )
+
+    def get_transform(self, image: np.ndarray) -> Transform:
+        random_scale = np.random.uniform(self.min_scale, self.max_scale)
+        return self._get_resize(image, random_scale)
 
 
 class RandomRotation(Augmentation):
@@ -224,6 +297,58 @@ class RandomRotation(Augmentation):
             return NoOpTransform()
 
         return RotationTransform(h, w, angle, expand=self.expand, center=center, interp=self.interp)
+
+
+class FixedSizeCrop(Augmentation):
+    """
+    If `crop_size` is smaller than the input image size, then it uses a random crop of
+    the crop size. If `crop_size` is larger than the input image size, then it pads
+    the right and the bottom of the image to the crop size if `pad` is True, otherwise
+    it returns the smaller image.
+    """
+
+    def __init__(self, crop_size: Tuple[int], pad: bool = True, pad_value: float = 128.0):
+        """
+        Args:
+            crop_size: target image (height, width).
+            pad: if True, will pad images smaller than `crop_size` up to `crop_size`
+            pad_value: the padding value.
+        """
+        super().__init__()
+        self._init(locals())
+
+    def _get_crop(self, image: np.ndarray) -> Transform:
+        # Compute the image scale and scaled size.
+        input_size = image.shape[:2]
+        output_size = self.crop_size
+
+        # Add random crop if the image is scaled up.
+        max_offset = np.subtract(input_size, output_size)
+        max_offset = np.maximum(max_offset, 0)
+        offset = np.multiply(max_offset, np.random.uniform(0.0, 1.0))
+        offset = np.round(offset).astype(int)
+        return CropTransform(
+            offset[1], offset[0], output_size[1], output_size[0], input_size[1], input_size[0]
+        )
+
+    def _get_pad(self, image: np.ndarray) -> Transform:
+        # Compute the image scale and scaled size.
+        input_size = image.shape[:2]
+        output_size = self.crop_size
+
+        # Add padding if the image is scaled down.
+        pad_size = np.subtract(output_size, input_size)
+        pad_size = np.maximum(pad_size, 0)
+        original_size = np.minimum(input_size, output_size)
+        return PadTransform(
+            0, 0, pad_size[1], pad_size[0], original_size[1], original_size[0], self.pad_value
+        )
+
+    def get_transform(self, image: np.ndarray) -> TransformList:
+        transforms = [self._get_crop(image)]
+        if self.pad:
+            transforms.append(self._get_pad(image))
+        return TransformList(transforms)
 
 
 class RandomCrop(Augmentation):
@@ -285,7 +410,7 @@ class RandomCrop(Augmentation):
             cw = np.random.randint(min(w, self.crop_size[0]), min(w, self.crop_size[1]) + 1)
             return ch, cw
         else:
-            NotImplementedError("Unknown crop type {}".format(self.crop_type))
+            raise NotImplementedError("Unknown crop type {}".format(self.crop_type))
 
 
 class RandomCrop_CategoryAreaConstraint(Augmentation):

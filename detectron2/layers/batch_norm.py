@@ -1,9 +1,8 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-import logging
 import torch
 import torch.distributed as dist
+from fvcore.nn.distributed import differentiable_all_reduce
 from torch import nn
-from torch.autograd.function import Function
 from torch.nn import functional as F
 
 from detectron2.utils import comm, env
@@ -78,15 +77,6 @@ class FrozenBatchNorm2d(nn.Module):
             if prefix + "running_var" not in state_dict:
                 state_dict[prefix + "running_var"] = torch.ones_like(self.running_var)
 
-        # NOTE: if a checkpoint is trained with BatchNorm and loaded (together with
-        # version number) to FrozenBatchNorm, running_var will be wrong. One solution
-        # is to remove the version number from the checkpoint.
-        if version is not None and version < 3:
-            logger = logging.getLogger(__name__)
-            logger.info("FrozenBatchNorm {} is upgraded to version 3.".format(prefix.rstrip(".")))
-            # In version < 3, running_var are used without +eps.
-            state_dict[prefix + "running_var"] -= self.eps
-
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
@@ -152,23 +142,10 @@ def get_norm(norm, out_channels):
             # for debugging:
             "nnSyncBN": nn.SyncBatchNorm,
             "naiveSyncBN": NaiveSyncBatchNorm,
+            # expose stats_mode N as an option to caller, required for zero-len inputs
+            "naiveSyncBN_N": lambda channels: NaiveSyncBatchNorm(channels, stats_mode="N"),
         }[norm]
     return norm(out_channels)
-
-
-class AllReduce(Function):
-    @staticmethod
-    def forward(ctx, input):
-        input_list = [torch.zeros_like(input) for k in range(dist.get_world_size())]
-        # Use allgather instead of allreduce since I don't trust in-place operations ..
-        dist.all_gather(input_list, input, async_op=False)
-        inputs = torch.stack(input_list, dim=0)
-        return torch.sum(inputs, dim=0)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        dist.all_reduce(grad_output, async_op=False)
-        return grad_output
 
 
 class NaiveSyncBatchNorm(BatchNorm2d):
@@ -210,13 +187,17 @@ class NaiveSyncBatchNorm(BatchNorm2d):
 
         B, C = input.shape[0], input.shape[1]
 
+        half_input = input.dtype == torch.float16
+        if half_input:
+            # fp16 does not have good enough numerics for the reduction here
+            input = input.float()
         mean = torch.mean(input, dim=[0, 2, 3])
         meansqr = torch.mean(input * input, dim=[0, 2, 3])
 
         if self._stats_mode == "":
             assert B > 0, 'SyncBatchNorm(stats_mode="") does not support zero batch size.'
             vec = torch.cat([mean, meansqr], dim=0)
-            vec = AllReduce.apply(vec) * (1.0 / dist.get_world_size())
+            vec = differentiable_all_reduce(vec) * (1.0 / dist.get_world_size())
             mean, meansqr = torch.split(vec, C)
             momentum = self.momentum
         else:
@@ -227,12 +208,11 @@ class NaiveSyncBatchNorm(BatchNorm2d):
                 vec = torch.cat(
                     [mean, meansqr, torch.ones([1], device=mean.device, dtype=mean.dtype)], dim=0
                 )
-            vec = AllReduce.apply(vec * B)
+            vec = differentiable_all_reduce(vec * B)
 
             total_batch = vec[-1].detach()
             momentum = total_batch.clamp(max=1) * self.momentum  # no update if total_batch is 0
-            total_batch = torch.max(total_batch, torch.ones_like(total_batch))  # avoid div-by-zero
-            mean, meansqr, _ = torch.split(vec / total_batch, C)
+            mean, meansqr, _ = torch.split(vec / total_batch.clamp(min=1), C)  # avoid div-by-zero
 
         var = meansqr - mean * mean
         invstd = torch.rsqrt(var + self.eps)
@@ -243,4 +223,54 @@ class NaiveSyncBatchNorm(BatchNorm2d):
 
         self.running_mean += momentum * (mean.detach() - self.running_mean)
         self.running_var += momentum * (var.detach() - self.running_var)
-        return input * scale + bias
+        ret = input * scale + bias
+        if half_input:
+            ret = ret.half()
+        return ret
+
+
+class CycleBatchNormList(nn.ModuleList):
+    """
+    Implement domain-specific BatchNorm by cycling.
+
+    When a BatchNorm layer is used for multiple input domains or input
+    features, it might need to maintain a separate test-time statistics
+    for each domain. See Sec 5.2 in :paper:`rethinking-batchnorm`.
+
+    This module implements it by using N separate BN layers
+    and it cycles through them every time a forward() is called.
+
+    NOTE: The caller of this module MUST guarantee to always call
+    this module by multiple of N times. Otherwise its test-time statistics
+    will be incorrect.
+    """
+
+    def __init__(self, length: int, bn_class=nn.BatchNorm2d, **kwargs):
+        """
+        Args:
+            length: number of BatchNorm layers to cycle.
+            bn_class: the BatchNorm class to use
+            kwargs: arguments of the BatchNorm class, such as num_features.
+        """
+        self._affine = kwargs.pop("affine", True)
+        super().__init__([bn_class(**kwargs, affine=False) for k in range(length)])
+        if self._affine:
+            # shared affine, domain-specific BN
+            channels = self[0].num_features
+            self.weight = nn.Parameter(torch.ones(channels))
+            self.bias = nn.Parameter(torch.zeros(channels))
+        self._pos = 0
+
+    def forward(self, x):
+        ret = self[self._pos](x)
+        self._pos = (self._pos + 1) % len(self)
+
+        if self._affine:
+            w = self.weight.reshape(1, -1, 1, 1)
+            b = self.bias.reshape(1, -1, 1, 1)
+            return ret * w + b
+        else:
+            return ret
+
+    def extra_repr(self):
+        return f"affine={self._affine}"

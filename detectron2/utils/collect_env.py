@@ -77,6 +77,8 @@ def collect_env_info():
         )
     except ImportError:
         data.append(("detectron2", "failed to import"))
+    except AttributeError:
+        data.append(("detectron2", "imported a wrong installation"))
 
     try:
         import detectron2._C as _C
@@ -102,6 +104,15 @@ def collect_env_info():
                 except subprocess.SubprocessError:
                     nvcc = "Not found"
                 data.append(("CUDA compiler", nvcc))
+        if has_cuda and sys.platform != "win32":
+            try:
+                so_file = importlib.util.find_spec("detectron2._C").origin
+            except (ImportError, AttributeError):
+                pass
+            else:
+                data.append(
+                    ("detectron2 arch flags", detect_compute_compatibility(CUDA_HOME, so_file))
+                )
     else:
         # print compilers that are used to build extension
         data.append(("Compiler", _C.get_compiler_version()))
@@ -115,7 +126,11 @@ def collect_env_info():
     data.append(("PyTorch", torch_version + " @" + os.path.dirname(torch.__file__)))
     data.append(("PyTorch debug build", torch.version.debug))
 
-    data.append(("GPU available", has_gpu))
+    if not has_gpu:
+        has_gpu_text = "No: torch.cuda.is_available() == False"
+    else:
+        has_gpu_text = "Yes"
+    data.append(("GPU available", has_gpu_text))
     if has_gpu:
         devices = defaultdict(list)
         for k in range(torch.cuda.device_count()):
@@ -129,6 +144,12 @@ def collect_env_info():
             msg = " - invalid!" if not (ROCM_HOME and os.path.isdir(ROCM_HOME)) else ""
             data.append(("ROCM_HOME", str(ROCM_HOME) + msg))
         else:
+            try:
+                from torch.utils.collect_env import get_nvidia_driver_version, run as _run
+
+                data.append(("Driver version", get_nvidia_driver_version(_run)))
+            except Exception:
+                pass
             msg = " - invalid!" if not (CUDA_HOME and os.path.isdir(CUDA_HOME)) else ""
             data.append(("CUDA_HOME", str(CUDA_HOME) + msg))
 
@@ -149,7 +170,7 @@ def collect_env_info():
                 torchvision_C = importlib.util.find_spec("torchvision._C").origin
                 msg = detect_compute_compatibility(CUDA_HOME, torchvision_C)
                 data.append(("torchvision arch flags", msg))
-            except ImportError:
+            except (ImportError, AttributeError):
                 data.append(("torchvision._C", "Not found"))
     except AttributeError:
         data.append(("torchvision", "unknown"))
@@ -158,18 +179,43 @@ def collect_env_info():
         import fvcore
 
         data.append(("fvcore", fvcore.__version__))
-    except ImportError:
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        import iopath
+
+        data.append(("iopath", iopath.__version__))
+    except (ImportError, AttributeError):
         pass
 
     try:
         import cv2
 
         data.append(("cv2", cv2.__version__))
-    except ImportError:
+    except (ImportError, AttributeError):
         data.append(("cv2", "Not found"))
     env_str = tabulate(data) + "\n"
     env_str += collect_torch_env()
     return env_str
+
+
+def test_nccl_ops():
+    num_gpu = torch.cuda.device_count()
+    if os.access("/tmp", os.W_OK):
+        import torch.multiprocessing as mp
+
+        dist_url = "file:///tmp/nccl_tmp_file"
+        print("Testing NCCL connectivity ... this should not hang.")
+        mp.spawn(_test_nccl_worker, nprocs=num_gpu, args=(num_gpu, dist_url), daemon=False)
+        print("NCCL succeeded.")
+
+
+def _test_nccl_worker(rank, num_gpu, dist_url):
+    import torch.distributed as dist
+
+    dist.init_process_group(backend="NCCL", init_method=dist_url, rank=rank, world_size=num_gpu)
+    dist.barrier(device_ids=[rank])
 
 
 if __name__ == "__main__":
@@ -181,7 +227,8 @@ if __name__ == "__main__":
         print(collect_env_info())
 
     if torch.cuda.is_available():
-        for k in range(torch.cuda.device_count()):
+        num_gpu = torch.cuda.device_count()
+        for k in range(num_gpu):
             device = f"cuda:{k}"
             try:
                 x = torch.tensor([1, 2.0], dtype=torch.float32)
@@ -191,3 +238,5 @@ if __name__ == "__main__":
                     f"Unable to copy tensor to device={device}: {e}. "
                     "Your CUDA environment is broken."
                 )
+        if num_gpu > 1:
+            test_nccl_ops()

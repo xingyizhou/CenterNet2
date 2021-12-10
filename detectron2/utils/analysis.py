@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import typing
+from typing import Any, List
+import fvcore
 from fvcore.nn import activation_count, flop_count, parameter_count, parameter_count_table
 from torch import nn
 
@@ -12,6 +14,7 @@ __all__ = [
     "flop_count_operators",
     "parameter_count_table",
     "parameter_count",
+    "FlopCountAnalysis",
 ]
 
 FLOPS_MODE = "flops"
@@ -37,6 +40,7 @@ _IGNORED_OPS = {
     "aten::neg",
     "aten::nonzero_numpy",
     "aten::reciprocal",
+    "aten::repeat_interleave",
     "aten::rsub",
     "aten::sigmoid",
     "aten::sigmoid_",
@@ -48,13 +52,28 @@ _IGNORED_OPS = {
 }
 
 
-def flop_count_operators(
-    model: nn.Module, inputs: list, **kwargs
-) -> typing.DefaultDict[str, float]:
+class FlopCountAnalysis(fvcore.nn.FlopCountAnalysis):
+    """
+    Same as :class:`fvcore.nn.FlopCountAnalysis`, but supports detectron2 models.
+    """
+
+    def __init__(self, model, inputs):
+        """
+        Args:
+            model (nn.Module):
+            inputs (Any): inputs of the given model. Does not have to be tuple of tensors.
+        """
+        wrapper = TracingAdapter(model, inputs, allow_non_tensor=True)
+        super().__init__(wrapper, wrapper.flattened_inputs)
+        self.set_op_handle(**{k: None for k in _IGNORED_OPS})
+
+
+def flop_count_operators(model: nn.Module, inputs: list) -> typing.DefaultDict[str, float]:
     """
     Implement operator-level flops counting using jit.
     This is a wrapper of :func:`fvcore.nn.flop_count` and adds supports for standard
     detection models in detectron2.
+    Please use :class:`FlopCountAnalysis` for more advanced functionalities.
 
     Note:
         The function runs the input through the model to compute flops.
@@ -69,8 +88,16 @@ def flop_count_operators(
         model: a detectron2 model that takes `list[dict]` as input.
         inputs (list[dict]): inputs to model, in detectron2's standard format.
             Only "image" key will be used.
+        supported_ops (dict[str, Handle]): see documentation of :func:`fvcore.nn.flop_count`
+
+    Returns:
+        Counter: Gflop count per operator
     """
-    return _wrapper_count_operators(model=model, inputs=inputs, mode=FLOPS_MODE, **kwargs)
+    old_train = model.training
+    model.eval()
+    ret = FlopCountAnalysis(model, inputs).by_operator()
+    model.train(old_train)
+    return {k: v / 1e9 for k, v in ret.items()}
 
 
 def activation_count_operators(
@@ -91,6 +118,9 @@ def activation_count_operators(
         model: a detectron2 model that takes `list[dict]` as input.
         inputs (list[dict]): inputs to model, in detectron2's standard format.
             Only "image" key will be used.
+
+    Returns:
+        Counter: activation count per operator
     """
     return _wrapper_count_operators(model=model, inputs=inputs, mode=ACTIVATIONS_MODE, **kwargs)
 
@@ -123,3 +153,36 @@ def _wrapper_count_operators(
         ret = ret[0]
     model.train(old_train)
     return ret
+
+
+def find_unused_parameters(model: nn.Module, inputs: Any) -> List[str]:
+    """
+    Given a model, find parameters that do not contribute
+    to the loss.
+
+    Args:
+        model: a model in training mode that returns losses
+        inputs: argument or a tuple of arguments. Inputs of the model
+
+    Returns:
+        list[str]: the name of unused parameters
+    """
+    assert model.training
+    for _, prm in model.named_parameters():
+        prm.grad = None
+
+    if isinstance(inputs, tuple):
+        losses = model(*inputs)
+    else:
+        losses = model(inputs)
+
+    if isinstance(losses, dict):
+        losses = sum(losses.values())
+    losses.backward()
+
+    unused: List[str] = []
+    for name, prm in model.named_parameters():
+        if prm.grad is None:
+            unused.append(name)
+        prm.grad = None
+    return unused

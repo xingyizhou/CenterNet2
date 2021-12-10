@@ -3,7 +3,6 @@
 import os
 import torch
 
-from detectron2.utils.env import TORCH_VERSION
 from detectron2.utils.file_io import PathManager
 
 from .torchscript_patch import freeze_training_mode, patch_instances
@@ -48,7 +47,6 @@ def scripting_with_instances(model, fields):
     Returns:
         torch.jit.ScriptModule: the model in torchscript format
     """
-    assert TORCH_VERSION >= (1, 8), "This feature is not available in PyTorch < 1.8"
     assert (
         not model.training
     ), "Currently we only support exporting models in evaluation mode to torchscript"
@@ -64,14 +62,14 @@ export_torchscript_with_instances = scripting_with_instances
 
 def dump_torchscript_IR(model, dir):
     """
-    Dump IR of a TracedModule/ScriptModule at various levels.
-    Useful for debugging.
+    Dump IR of a TracedModule/ScriptModule/Function in various format (code, graph,
+    inlined graph). Useful for debugging.
 
     Args:
-        model (TracedModule or ScriptModule): traced or scripted module
+        model (TracedModule/ScriptModule/ScriptFUnction): traced or scripted module
         dir (str): output directory to dump files.
     """
-    # TODO: support ScriptFunction as well
+    dir = os.path.expanduser(dir)
     PathManager.mkdirs(dir)
 
     def _get_script_mod(mod):
@@ -109,19 +107,26 @@ def dump_torchscript_IR(model, dir):
             for name, m in mod.named_children():
                 dump_code(prefix + "." + name, m)
 
-        dump_code("", model)
+        if isinstance(model, torch.jit.ScriptFunction):
+            f.write(get_code(model))
+        else:
+            dump_code("", model)
 
-    # Recursively dump IR of all modules
-    with PathManager.open(os.path.join(dir, "model_ts_IR.txt"), "w") as f:
+    def _get_graph(model):
         try:
-            f.write(_get_script_mod(model)._c.dump_to_str(True, False, False))
+            # Recursively dump IR of all modules
+            return _get_script_mod(model)._c.dump_to_str(True, False, False)
         except AttributeError:
-            pass
+            return model.graph.str()
+
+    with PathManager.open(os.path.join(dir, "model_ts_IR.txt"), "w") as f:
+        f.write(_get_graph(model))
 
     # Dump IR of the entire graph (all submodules inlined)
     with PathManager.open(os.path.join(dir, "model_ts_IR_inlined.txt"), "w") as f:
         f.write(str(model.inlined_graph))
 
-    # Dump the model structure in pytorch style
-    with PathManager.open(os.path.join(dir, "model.txt"), "w") as f:
-        f.write(str(model))
+    if not isinstance(model, torch.jit.ScriptFunction):
+        # Dump the model structure in pytorch style
+        with PathManager.open(os.path.join(dir, "model.txt"), "w") as f:
+            f.write(str(model))
