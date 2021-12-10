@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from detectron2.layers import ShapeSpec, get_norm
+from detectron2.config import configurable
 from ..layers.deform_conv import DFConv2d
 
 __all__ = ["CenterNetHead"]
@@ -18,26 +19,37 @@ class Scale(nn.Module):
         return input * self.scale
 
 class CenterNetHead(nn.Module):
-    def __init__(self, cfg, input_shape: List[ShapeSpec]):
+    @configurable
+    def __init__(self, 
+        # input_shape: List[ShapeSpec],
+        in_channels,
+        num_levels,
+        *,
+        num_classes=80,
+        with_agn_hm=False,
+        only_proposal=False,
+        norm='GN',
+        num_cls_convs=4,
+        num_box_convs=4,
+        num_share_convs=0,
+        use_deformable=False,
+        prior_prob=0.01):
         super().__init__()
-        self.num_classes = cfg.MODEL.CENTERNET.NUM_CLASSES
-        self.with_agn_hm = cfg.MODEL.CENTERNET.WITH_AGN_HM
-        self.only_proposal = cfg.MODEL.CENTERNET.ONLY_PROPOSAL
+        self.num_classes = num_classes
+        self.with_agn_hm = with_agn_hm
+        self.only_proposal = only_proposal
         self.out_kernel = 3
-        norm = cfg.MODEL.CENTERNET.NORM
 
-        head_configs = {"cls": (cfg.MODEL.CENTERNET.NUM_CLS_CONVS \
-                                if not self.only_proposal else 0,
-                                cfg.MODEL.CENTERNET.USE_DEFORMABLE),
-                        "bbox": (cfg.MODEL.CENTERNET.NUM_BOX_CONVS,
-                                 cfg.MODEL.CENTERNET.USE_DEFORMABLE),
-                        "share": (cfg.MODEL.CENTERNET.NUM_SHARE_CONVS,
-                                  cfg.MODEL.CENTERNET.USE_DEFORMABLE)}
+        head_configs = {
+            "cls": (num_cls_convs if not self.only_proposal else 0, \
+                use_deformable),
+            "bbox": (num_box_convs, use_deformable),
+            "share": (num_share_convs, use_deformable)}
 
-        in_channels = [s.channels for s in input_shape]
-        assert len(set(in_channels)) == 1, \
-            "Each level must have the same channel!"
-        in_channels = in_channels[0]
+        # in_channels = [s.channels for s in input_shape]
+        # assert len(set(in_channels)) == 1, \
+        #     "Each level must have the same channel!"
+        # in_channels = in_channels[0]
         channels = {
             'cls': in_channels,
             'bbox': in_channels,
@@ -72,7 +84,7 @@ class CenterNetHead(nn.Module):
         )
 
         self.scales = nn.ModuleList(
-            [Scale(init_value=1.0) for _ in input_shape])
+            [Scale(init_value=1.0) for _ in range(num_levels)])
 
         for modules in [
             self.cls_tower, self.bbox_tower,
@@ -85,7 +97,7 @@ class CenterNetHead(nn.Module):
                     torch.nn.init.constant_(l.bias, 0)
         
         torch.nn.init.constant_(self.bbox_pred.bias, 8.)
-        prior_prob = cfg.MODEL.CENTERNET.PRIOR_PROB
+        prior_prob = prior_prob
         bias_value = -math.log((1 - prior_prob) / prior_prob)
 
         if self.with_agn_hm:
@@ -108,6 +120,23 @@ class CenterNetHead(nn.Module):
             torch.nn.init.constant_(self.cls_logits.bias, bias_value)
             torch.nn.init.normal_(self.cls_logits.weight, std=0.01)
 
+    @classmethod
+    def from_config(cls, cfg, input_shape):
+        ret = {
+            # 'input_shape': input_shape,
+            'in_channels': [s.channels for s in input_shape][0],
+            'num_levels': len(input_shape),
+            'num_classes': cfg.MODEL.CENTERNET.NUM_CLASSES,
+            'with_agn_hm': cfg.MODEL.CENTERNET.WITH_AGN_HM,
+            'only_proposal': cfg.MODEL.CENTERNET.ONLY_PROPOSAL,
+            'norm': cfg.MODEL.CENTERNET.NORM,
+            'num_cls_convs': cfg.MODEL.CENTERNET.NUM_CLS_CONVS,
+            'num_box_convs': cfg.MODEL.CENTERNET.NUM_BOX_CONVS,
+            'num_share_convs': cfg.MODEL.CENTERNET.NUM_SHARE_CONVS,
+            'use_deformable': cfg.MODEL.CENTERNET.USE_DEFORMABLE,
+            'prior_prob': cfg.MODEL.CENTERNET.PRIOR_PROB,
+        }
+        return ret
 
     def forward(self, x):
         clss = []

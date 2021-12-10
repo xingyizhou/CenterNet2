@@ -1,3 +1,4 @@
+
 import math
 import json
 import copy
@@ -12,6 +13,7 @@ from detectron2.layers import ShapeSpec, cat
 from detectron2.structures import Instances, Boxes
 from detectron2.modeling import detector_postprocess
 from detectron2.utils.comm import get_world_size
+from detectron2.config import configurable
 
 from ..layers.heatmap_focal_loss import heatmap_focal_loss_jit
 from ..layers.heatmap_focal_loss import binary_heatmap_focal_loss_jit
@@ -27,56 +29,151 @@ INF = 100000000
 
 @PROPOSAL_GENERATOR_REGISTRY.register()
 class CenterNet(nn.Module):
-    def __init__(self, cfg, input_shape: Dict[str, ShapeSpec]):
+    @configurable
+    def __init__(self, 
+        # input_shape: Dict[str, ShapeSpec],
+        in_channels=256,
+        *,
+        num_classes=80,
+        in_features=("p3", "p4", "p5", "p6", "p7"),
+        strides=(8, 16, 32, 64, 128),
+        score_thresh=0.05,
+        hm_min_overlap=0.8,
+        loc_loss_type='giou',
+        min_radius=4,
+        hm_focal_alpha=0.25,
+        hm_focal_beta=4,
+        loss_gamma=2.0,
+        reg_weight=2.0,
+        not_norm_reg=True,
+        with_agn_hm=False,
+        only_proposal=False,
+        as_proposal=False,
+        not_nms=False,
+        pos_weight=1.,
+        neg_weight=1.,
+        sigmoid_clamp=1e-4,
+        ignore_high_fp=-1.,
+        center_nms=False,
+        sizes_of_interest=[[0,80],[64,160],[128,320],[256,640],[512,10000000]],
+        more_pos=False,
+        more_pos_thresh=0.2,
+        more_pos_topk=9,
+        pre_nms_topk_train=1000,
+        pre_nms_topk_test=1000,
+        post_nms_topk_train=100,
+        post_nms_topk_test=100,
+        nms_thresh_train=0.6,
+        nms_thresh_test=0.6,
+        no_reduce=False,
+        debug=False,
+        vis_thresh=0.5,
+        pixel_mean=[103.530,116.280,123.675],
+        pixel_std=[1.0,1.0,1.0],
+        device='cuda',
+        centernet_head=None,
+    ):
         super().__init__()
-        self.num_classes = cfg.MODEL.CENTERNET.NUM_CLASSES
-        self.in_features = cfg.MODEL.CENTERNET.IN_FEATURES
-        self.strides = cfg.MODEL.CENTERNET.FPN_STRIDES
-        self.score_thresh = cfg.MODEL.CENTERNET.INFERENCE_TH
-        self.min_radius = cfg.MODEL.CENTERNET.MIN_RADIUS
-        self.hm_focal_alpha = cfg.MODEL.CENTERNET.HM_FOCAL_ALPHA
-        self.hm_focal_beta = cfg.MODEL.CENTERNET.HM_FOCAL_BETA
-        self.loss_gamma = cfg.MODEL.CENTERNET.LOSS_GAMMA
-        self.reg_weight = cfg.MODEL.CENTERNET.REG_WEIGHT
-        self.not_norm_reg = cfg.MODEL.CENTERNET.NOT_NORM_REG
-        self.with_agn_hm = cfg.MODEL.CENTERNET.WITH_AGN_HM
-        self.only_proposal = cfg.MODEL.CENTERNET.ONLY_PROPOSAL
-        self.as_proposal = cfg.MODEL.CENTERNET.AS_PROPOSAL
-        self.not_nms = cfg.MODEL.CENTERNET.NOT_NMS
-        self.pos_weight = cfg.MODEL.CENTERNET.POS_WEIGHT
-        self.neg_weight = cfg.MODEL.CENTERNET.NEG_WEIGHT
-        self.sigmoid_clamp = cfg.MODEL.CENTERNET.SIGMOID_CLAMP
-        self.ignore_high_fp = cfg.MODEL.CENTERNET.IGNORE_HIGH_FP
-        self.center_nms = cfg.MODEL.CENTERNET.CENTER_NMS
-        self.sizes_of_interest = cfg.MODEL.CENTERNET.SOI
-        self.more_pos = cfg.MODEL.CENTERNET.MORE_POS
-        self.more_pos_thresh = cfg.MODEL.CENTERNET.MORE_POS_THRESH
-        self.more_pos_topk = cfg.MODEL.CENTERNET.MORE_POS_TOPK
-        self.pre_nms_topk_train = cfg.MODEL.CENTERNET.PRE_NMS_TOPK_TRAIN
-        self.pre_nms_topk_test = cfg.MODEL.CENTERNET.PRE_NMS_TOPK_TEST
-        self.post_nms_topk_train = cfg.MODEL.CENTERNET.POST_NMS_TOPK_TRAIN
-        self.post_nms_topk_test = cfg.MODEL.CENTERNET.POST_NMS_TOPK_TEST
-        self.nms_thresh_train = cfg.MODEL.CENTERNET.NMS_TH_TRAIN
-        self.nms_thresh_test = cfg.MODEL.CENTERNET.NMS_TH_TEST
-        self.debug  = cfg.DEBUG
-        self.vis_thresh = cfg.VIS_THRESH
+        self.num_classes = num_classes
+        self.in_features = in_features
+        self.strides = strides
+        self.score_thresh = score_thresh
+        self.min_radius = min_radius
+        self.hm_focal_alpha = hm_focal_alpha
+        self.hm_focal_beta = hm_focal_beta
+        self.loss_gamma = loss_gamma
+        self.reg_weight = reg_weight
+        self.not_norm_reg = not_norm_reg
+        self.with_agn_hm = with_agn_hm
+        self.only_proposal = only_proposal
+        self.as_proposal = as_proposal
+        self.not_nms = not_nms
+        self.pos_weight = pos_weight
+        self.neg_weight = neg_weight
+        self.sigmoid_clamp = sigmoid_clamp
+        self.ignore_high_fp = ignore_high_fp
+        self.center_nms = center_nms
+        self.sizes_of_interest = sizes_of_interest
+        self.more_pos = more_pos
+        self.more_pos_thresh = more_pos_thresh
+        self.more_pos_topk = more_pos_topk
+        self.pre_nms_topk_train = pre_nms_topk_train
+        self.pre_nms_topk_test = pre_nms_topk_test
+        self.post_nms_topk_train = post_nms_topk_train
+        self.post_nms_topk_test = post_nms_topk_test
+        self.nms_thresh_train = nms_thresh_train
+        self.nms_thresh_test = nms_thresh_test
+        self.no_reduce = no_reduce
+        self.debug = debug
+        self.vis_thresh = vis_thresh
         if self.center_nms:
             self.not_nms = True
-        self.iou_loss = IOULoss(cfg.MODEL.CENTERNET.LOC_LOSS_TYPE)
+        self.iou_loss = IOULoss(loc_loss_type)
         assert (not self.only_proposal) or self.with_agn_hm
         # delta for rendering heatmap
-        self.delta = (1 - cfg.MODEL.CENTERNET.HM_MIN_OVERLAP) \
-            / (1 + cfg.MODEL.CENTERNET.HM_MIN_OVERLAP)
-        
-        input_shape_head = [input_shape[f] for f in self.in_features]
-        self.centernet_head = CenterNetHead(cfg, input_shape_head)
-
+        self.delta = (1 - hm_min_overlap) / (1 + hm_min_overlap)
+        if centernet_head is None:
+            self.centernet_head = CenterNetHead(
+                in_channels=in_channels,
+                num_levels=len(in_features),
+                with_agn_hm=with_agn_hm,
+                only_proposal=only_proposal)
+        else:
+            self.centernet_head = centernet_head
         if self.debug:
-            pixel_mean = torch.Tensor(cfg.MODEL.PIXEL_MEAN).to(
-                torch.device(cfg.MODEL.DEVICE)).view(3, 1, 1)
-            pixel_std = torch.Tensor(cfg.MODEL.PIXEL_STD).to(
-                torch.device(cfg.MODEL.DEVICE)).view(3, 1, 1)
+            pixel_mean = torch.Tensor(pixel_mean).to(
+                torch.device(device)).view(3, 1, 1)
+            pixel_std = torch.Tensor(pixel_std).to(
+                torch.device(device)).view(3, 1, 1)
             self.denormalizer = lambda x: x * pixel_std + pixel_mean
+
+    @classmethod
+    def from_config(cls, cfg, input_shape):
+        ret = {
+            # 'input_shape': input_shape,
+            'in_channels': input_shape[
+                cfg.MODEL.CENTERNET.IN_FEATURES[0]].channels,
+            'num_classes': cfg.MODEL.CENTERNET.NUM_CLASSES,
+            'in_features': cfg.MODEL.CENTERNET.IN_FEATURES,
+            'strides': cfg.MODEL.CENTERNET.FPN_STRIDES,
+            'score_thresh': cfg.MODEL.CENTERNET.INFERENCE_TH,
+            'loc_loss_type': cfg.MODEL.CENTERNET.LOC_LOSS_TYPE,
+            'hm_min_overlap': cfg.MODEL.CENTERNET.HM_MIN_OVERLAP,
+            'min_radius': cfg.MODEL.CENTERNET.MIN_RADIUS,
+            'hm_focal_alpha': cfg.MODEL.CENTERNET.HM_FOCAL_ALPHA,
+            'hm_focal_beta': cfg.MODEL.CENTERNET.HM_FOCAL_BETA,
+            'loss_gamma': cfg.MODEL.CENTERNET.LOSS_GAMMA,
+            'reg_weight': cfg.MODEL.CENTERNET.REG_WEIGHT,
+            'not_norm_reg': cfg.MODEL.CENTERNET.NOT_NORM_REG,
+            'with_agn_hm': cfg.MODEL.CENTERNET.WITH_AGN_HM,
+            'only_proposal': cfg.MODEL.CENTERNET.ONLY_PROPOSAL,
+            'as_proposal': cfg.MODEL.CENTERNET.AS_PROPOSAL,
+            'not_nms': cfg.MODEL.CENTERNET.NOT_NMS,
+            'pos_weight': cfg.MODEL.CENTERNET.POS_WEIGHT,
+            'neg_weight': cfg.MODEL.CENTERNET.NEG_WEIGHT,
+            'sigmoid_clamp': cfg.MODEL.CENTERNET.SIGMOID_CLAMP,
+            'ignore_high_fp': cfg.MODEL.CENTERNET.IGNORE_HIGH_FP,
+            'center_nms': cfg.MODEL.CENTERNET.CENTER_NMS,
+            'sizes_of_interest': cfg.MODEL.CENTERNET.SOI,
+            'more_pos': cfg.MODEL.CENTERNET.MORE_POS,
+            'more_pos_thresh': cfg.MODEL.CENTERNET.MORE_POS_THRESH,
+            'more_pos_topk': cfg.MODEL.CENTERNET.MORE_POS_TOPK,
+            'pre_nms_topk_train': cfg.MODEL.CENTERNET.PRE_NMS_TOPK_TRAIN,
+            'pre_nms_topk_test': cfg.MODEL.CENTERNET.PRE_NMS_TOPK_TEST,
+            'post_nms_topk_train': cfg.MODEL.CENTERNET.POST_NMS_TOPK_TRAIN,
+            'post_nms_topk_test': cfg.MODEL.CENTERNET.POST_NMS_TOPK_TEST,
+            'nms_thresh_train': cfg.MODEL.CENTERNET.NMS_TH_TRAIN,
+            'nms_thresh_test': cfg.MODEL.CENTERNET.NMS_TH_TEST,
+            'no_reduce': cfg.MODEL.CENTERNET.NO_REDUCE,
+            'debug': cfg.DEBUG,
+            'vis_thresh': cfg.VIS_THRESH,
+            'pixel_mean': cfg.MODEL.PIXEL_MEAN,
+            'pixel_std': cfg.MODEL.PIXEL_STD,
+            'device': cfg.MODEL.DEVICE,
+            'centernet_head': CenterNetHead(
+                cfg, [input_shape[f] for f in cfg.MODEL.CENTERNET.IN_FEATURES]),
+        }
+        return ret
 
 
     def forward(self, images, features_dict, gt_instances):
@@ -156,8 +253,11 @@ class CenterNet(nn.Module):
         assert (torch.isfinite(reg_pred).all().item())
         num_pos_local = pos_inds.numel()
         num_gpus = get_world_size()
-        total_num_pos = reduce_sum(
-            pos_inds.new_tensor([num_pos_local])).item()
+        if self.no_reduce:
+            total_num_pos = num_pos_local * num_gpus
+        else:
+            total_num_pos = reduce_sum(
+                pos_inds.new_tensor([num_pos_local])).item()
         num_pos_avg = max(total_num_pos / num_gpus, 1.0)
 
         losses = {}
@@ -183,7 +283,11 @@ class CenterNet(nn.Module):
         reg_weight_map = reg_weight_map[reg_inds]
         reg_weight_map = reg_weight_map * 0 + 1 \
             if self.not_norm_reg else reg_weight_map
-        reg_norm = max(reduce_sum(reg_weight_map.sum()).item() / num_gpus, 1)
+        if self.no_reduce:
+            reg_norm = max(reg_weight_map.sum(), 1)
+        else:
+            reg_norm = max(reduce_sum(reg_weight_map.sum()).item() / num_gpus, 1)
+        
         reg_loss = self.reg_weight * self.iou_loss(
             reg_pred, reg_targets_pos, reg_weight_map,
             reduction='sum') / reg_norm
@@ -617,7 +721,7 @@ class CenterNet(nn.Module):
             if num_dets > post_nms_topk:
                 cls_scores = result.scores
                 image_thresh, _ = torch.kthvalue(
-                    cls_scores.cpu(),
+                    cls_scores.float().cpu(),
                     num_dets - post_nms_topk + 1
                 )
                 keep = cls_scores >= image_thresh.item()
