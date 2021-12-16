@@ -263,7 +263,7 @@ class CenterNet(nn.Module):
         losses = {}
         if not self.only_proposal:
             pos_loss, neg_loss = heatmap_focal_loss_jit(
-                logits_pred, flattened_hms, pos_inds, labels,
+                logits_pred.float(), flattened_hms.float(), pos_inds, labels,
                 alpha=self.hm_focal_alpha, 
                 beta=self.hm_focal_beta, 
                 gamma=self.loss_gamma, 
@@ -296,7 +296,7 @@ class CenterNet(nn.Module):
         if self.with_agn_hm:
             cat_agn_heatmap = flattened_hms.max(dim=1)[0] # M
             agn_pos_loss, agn_neg_loss = binary_heatmap_focal_loss_jit(
-                agn_hm_pred, cat_agn_heatmap, pos_inds,
+                agn_hm_pred.float(), cat_agn_heatmap.float(), pos_inds,
                 alpha=self.hm_focal_alpha, 
                 beta=self.hm_focal_beta, 
                 gamma=self.loss_gamma,
