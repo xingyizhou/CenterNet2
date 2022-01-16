@@ -14,4 +14,4 @@ from .data.datasets.coco import _PREDEFINED_SPLITS_COCO
 from .data.datasets import nuimages
 
 # Importing function from config.py
-from .config.py import add_centernet_config
+from .config import add_centernet_config
