@@ -61,7 +61,7 @@ Our project is developed on [detectron2](https://github.com/facebookresearch/det
 We use the default detectron2 demo script. To run inference on an image folder using our pre-trained model, run
 
 ~~~
-python projects/CenterNet2/demo/demo.py --config-file projects/CenterNet2/configs/CenterNet2_R50_1x.yaml --input path/to/image/ --opts MODEL.WEIGHTS models/CenterNet2_R50_1x.pth
+python projects/CenterNet2/demo.py --config-file projects/CenterNet2/configs/CenterNet2_R50_1x.yaml --input path/to/image_dir/ --opts MODEL.WEIGHTS models/CenterNet2_R50_1x.pth
 ~~~
 
 ## Benchmark evaluation and training
