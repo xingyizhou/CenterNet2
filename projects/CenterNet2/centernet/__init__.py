@@ -12,3 +12,6 @@ from .modeling.backbone.res2net import build_p67_res2net_fpn_backbone
 from .data.datasets.objects365 import categories_v1
 from .data.datasets.coco import _PREDEFINED_SPLITS_COCO
 from .data.datasets import nuimages
+
+# Importing function from config.py
+from .config.py import add_centernet_config
