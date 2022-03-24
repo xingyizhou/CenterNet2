@@ -79,6 +79,7 @@ def add_centernet_config(cfg):
     _C.INPUT.SCALE_RANGE = (0.1, 2.)
     # 'default' for fixed short/ long edge, 'square' for max size=INPUT.SIZE
     _C.INPUT.TEST_INPUT_TYPE = 'default' 
+    _C.INPUT.NOT_CLAMP_BOX = False
     
     _C.DEBUG = False
     _C.SAVE_DEBUG = False

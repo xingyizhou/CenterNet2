@@ -66,6 +66,7 @@ class CenterNet(nn.Module):
         nms_thresh_train=0.6,
         nms_thresh_test=0.6,
         no_reduce=False,
+        not_clamp_box=False,
         debug=False,
         vis_thresh=0.5,
         pixel_mean=[103.530,116.280,123.675],
@@ -104,6 +105,8 @@ class CenterNet(nn.Module):
         self.nms_thresh_train = nms_thresh_train
         self.nms_thresh_test = nms_thresh_test
         self.no_reduce = no_reduce
+        self.not_clamp_box = not_clamp_box
+        
         self.debug = debug
         self.vis_thresh = vis_thresh
         if self.center_nms:
@@ -165,6 +168,7 @@ class CenterNet(nn.Module):
             'nms_thresh_train': cfg.MODEL.CENTERNET.NMS_TH_TRAIN,
             'nms_thresh_test': cfg.MODEL.CENTERNET.NMS_TH_TEST,
             'no_reduce': cfg.MODEL.CENTERNET.NO_REDUCE,
+            'not_clamp_box': cfg.INPUT.NOT_CLAMP_BOX,
             'debug': cfg.DEBUG,
             'vis_thresh': cfg.VIS_THRESH,
             'pixel_mean': cfg.MODEL.PIXEL_MEAN,
@@ -463,7 +467,11 @@ class CenterNet(nn.Module):
             bboxes = targets_per_im.gt_boxes.tensor # n x 4
             n = bboxes.shape[0]
             centers = ((bboxes[:, [0, 1]] + bboxes[:, [2, 3]]) / 2) # n x 2
-            centers = centers.view(n, 1, 2).expand(n, L, 2)
+            centers = centers.view(n, 1, 2).expand(n, L, 2).contiguous()
+            if self.not_clamp_box:
+                h, w = gt_instances[im_i]._image_size
+                centers[:, :, 0].clamp_(min=0).clamp_(max=w-1)
+                centers[:, :, 1].clamp_(min=0).clamp_(max=h-1)
             strides = strides_default.view(1, L, 1).expand(n, L, 2)
             centers_inds = (centers / strides).long() # n x L x 2
             Ws = shapes_per_level[:, 1].view(1, L).expand(n, L)
