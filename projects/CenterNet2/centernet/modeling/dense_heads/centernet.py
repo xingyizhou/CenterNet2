@@ -600,6 +600,7 @@ class CenterNet(nn.Module):
             (dist_y <= strides_expanded[:, :, 0])
 
 
+    @torch.no_grad()
     def inference(self, images, clss_per_level, reg_pred_per_level, 
         agn_hm_pred_per_level, grids):
         logits_pred = [x.sigmoid() if x is not None else None \
@@ -631,6 +632,7 @@ class CenterNet(nn.Module):
         return proposals, {}
 
 
+    @torch.no_grad()
     def predict_instances(
         self, grids, logits_pred, reg_pred, image_sizes, agn_hm_pred, 
         is_proposal=False):
@@ -645,7 +647,8 @@ class CenterNet(nn.Module):
             boxlists, nms=not self.not_nms)
         return boxlists
 
-
+    
+    @torch.no_grad()
     def predict_single_level(
         self, grids, heatmap, reg_pred, image_sizes, agn_hm, level, 
         is_proposal=False):
@@ -712,7 +715,8 @@ class CenterNet(nn.Module):
             results.append(boxlist)
         return results
 
-
+    
+    @torch.no_grad()
     def nms_and_topK(self, boxlists, nms=True):
         num_images = len(boxlists)
         results = []
@@ -740,7 +744,8 @@ class CenterNet(nn.Module):
             results.append(result)
         return results
 
-
+    
+    @torch.no_grad()
     def _add_more_pos(self, reg_pred, gt_instances, shapes_per_level):
         labels, level_masks, c33_inds, c33_masks, c33_regs = \
             self._get_c33_inds(gt_instances, shapes_per_level)
@@ -773,6 +778,7 @@ class CenterNet(nn.Module):
         return pos_inds, labels
         
     
+    @torch.no_grad()
     def _get_c33_inds(self, gt_instances, shapes_per_level):
         '''
         TODO (Xingyi): The current implementation is ugly. Refactor.
