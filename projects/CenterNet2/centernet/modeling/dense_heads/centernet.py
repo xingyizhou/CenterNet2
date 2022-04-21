@@ -410,13 +410,13 @@ class CenterNet(nn.Module):
 
             dist2 = ((grids.view(M, 1, 2).expand(M, N, 2) - \
                 centers_expanded) ** 2).sum(dim=2) # M x N
-            dist2[is_peak] = 0
             radius2 = self.delta ** 2 * 2 * area # N
             radius2 = torch.clamp(
                 radius2, min=self.min_radius ** 2)
             weighted_dist2 = dist2 / radius2.view(1, N).expand(M, N) # M x N            
             reg_target = self._get_reg_targets(
                 reg_target, weighted_dist2.clone(), reg_mask, area) # M x 4
+            dist2[is_peak] = 0
 
             if self.only_proposal:
                 flattened_hm = self._create_agn_heatmaps_from_dist(
